@@ -24,6 +24,7 @@
 static const char * TAG = "wifi_time";
 
 static EventGroupHandle_t s_wifi_event_group;
+static esp_netif_t * s_sta_netif;
 static int s_retry_count;
 static bool s_started;
 static bool s_connected;
@@ -77,9 +78,43 @@ static esp_err_t init_nvs(void)
     return ret;
 }
 
+static bool has_text(const char * text)
+{
+    return text != NULL && text[0] != '\0';
+}
+
+static esp_err_t configure_static_ip(const wifi_time_config_t * config)
+{
+    if(!has_text(config->static_ip)) {
+        ESP_LOGI(TAG, "static ip disabled, using dhcp");
+        return ESP_OK;
+    }
+
+    const char * gateway = has_text(config->gateway) ? config->gateway : "192.168.1.1";
+    const char * netmask = has_text(config->netmask) ? config->netmask : "255.255.255.0";
+    const char * dns = has_text(config->dns) ? config->dns : gateway;
+
+    esp_netif_ip_info_t ip_info = {0};
+    esp_netif_dns_info_t dns_info = {0};
+
+    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(config->static_ip, &ip_info.ip), TAG, "parse static ip");
+    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(gateway, &ip_info.gw), TAG, "parse gateway");
+    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(netmask, &ip_info.netmask), TAG, "parse netmask");
+    ESP_RETURN_ON_ERROR(esp_netif_dhcpc_stop(s_sta_netif), TAG, "stop dhcp client");
+    ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(s_sta_netif, &ip_info), TAG, "set static ip");
+
+    dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(dns, &dns_info.ip.u_addr.ip4), TAG, "parse dns");
+    ESP_RETURN_ON_ERROR(esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &dns_info), TAG, "set dns");
+
+    ESP_LOGI(TAG, "static ip configured: ip=%s gateway=%s netmask=%s dns=%s",
+             config->static_ip, gateway, netmask, dns);
+    return ESP_OK;
+}
+
 esp_err_t wifi_time_start(const wifi_time_config_t * config)
 {
-    if(config == NULL || config->ssid == NULL || config->ssid[0] == '\0') {
+    if(config == NULL || !has_text(config->ssid)) {
         ESP_LOGW(TAG, "wifi ssid is empty, skip wifi time sync");
         return ESP_ERR_INVALID_ARG;
     }
@@ -110,7 +145,15 @@ esp_err_t wifi_time_start(const wifi_time_config_t * config)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if(s_sta_netif == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    if(has_text(config->hostname)) {
+        ESP_RETURN_ON_ERROR(esp_netif_set_hostname(s_sta_netif, config->hostname), TAG, "set hostname");
+        ESP_LOGI(TAG, "hostname set to %s", config->hostname);
+    }
+    ESP_RETURN_ON_ERROR(configure_static_ip(config), TAG, "configure static ip");
 
     wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&wifi_init_config), TAG, "init wifi");

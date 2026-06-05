@@ -12,6 +12,11 @@ extern "C" {
 typedef struct {
     const char * ssid;
     const char * password;
+    const char * hostname;
+    const char * static_ip;
+    const char * gateway;
+    const char * netmask;
+    const char * dns;
     const char * timezone;
     const char * sntp_server;
     uint32_t connect_timeout_ms;

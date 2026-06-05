@@ -12,6 +12,36 @@ menu "System Dashboard"
         help
             WiFi password used by the dashboard SNTP clock.
 
+    config DASHBOARD_HOSTNAME
+        string "WiFi hostname"
+        default "fnos-dashboard"
+        help
+            Hostname advertised by the dashboard network interface.
+
+    config DASHBOARD_STATIC_IP
+        string "Static IPv4 address"
+        default "192.168.1.222"
+        help
+            Static IPv4 address for the dashboard. Leave empty to use DHCP.
+
+    config DASHBOARD_GATEWAY
+        string "IPv4 gateway"
+        default "192.168.1.1"
+        help
+            Gateway used when static IPv4 is enabled.
+
+    config DASHBOARD_NETMASK
+        string "IPv4 netmask"
+        default "255.255.255.0"
+        help
+            Netmask used when static IPv4 is enabled.
+
+    config DASHBOARD_DNS
+        string "IPv4 DNS server"
+        default "192.168.1.1"
+        help
+            DNS server used when static IPv4 is enabled.
+
     config DASHBOARD_TIMEZONE
         string "Timezone"
         default "CST-8"

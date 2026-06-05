@@ -19,6 +19,26 @@
 #define CONFIG_DASHBOARD_WIFI_PASSWORD ""
 #endif
 
+#ifndef CONFIG_DASHBOARD_HOSTNAME
+#define CONFIG_DASHBOARD_HOSTNAME "fnos-dashboard"
+#endif
+
+#ifndef CONFIG_DASHBOARD_STATIC_IP
+#define CONFIG_DASHBOARD_STATIC_IP "192.168.1.222"
+#endif
+
+#ifndef CONFIG_DASHBOARD_GATEWAY
+#define CONFIG_DASHBOARD_GATEWAY "192.168.1.1"
+#endif
+
+#ifndef CONFIG_DASHBOARD_NETMASK
+#define CONFIG_DASHBOARD_NETMASK "255.255.255.0"
+#endif
+
+#ifndef CONFIG_DASHBOARD_DNS
+#define CONFIG_DASHBOARD_DNS "192.168.1.1"
+#endif
+
 #ifndef CONFIG_DASHBOARD_TIMEZONE
 #define CONFIG_DASHBOARD_TIMEZONE "CST-8"
 #endif
@@ -52,14 +72,19 @@ void app_main(void)
     const wifi_time_config_t wifi_time = {
         .ssid = CONFIG_DASHBOARD_WIFI_SSID,
         .password = CONFIG_DASHBOARD_WIFI_PASSWORD,
+        .hostname = CONFIG_DASHBOARD_HOSTNAME,
+        .static_ip = CONFIG_DASHBOARD_STATIC_IP,
+        .gateway = CONFIG_DASHBOARD_GATEWAY,
+        .netmask = CONFIG_DASHBOARD_NETMASK,
+        .dns = CONFIG_DASHBOARD_DNS,
         .timezone = CONFIG_DASHBOARD_TIMEZONE,
         .sntp_server = CONFIG_DASHBOARD_SNTP_SERVER,
         .connect_timeout_ms = 15000,
         .sync_timeout_ms = 15000,
     };
 
-    ESP_LOGI(TAG, "wifi config: ssid=%s, timezone=%s, sntp=%s",
-             wifi_time.ssid, wifi_time.timezone, wifi_time.sntp_server);
+    ESP_LOGI(TAG, "wifi config: ssid=%s, ip=%s, timezone=%s, sntp=%s",
+             wifi_time.ssid, wifi_time.static_ip, wifi_time.timezone, wifi_time.sntp_server);
     esp_err_t time_ret = wifi_time_start(&wifi_time);
     if(time_ret != ESP_OK && time_ret != ESP_ERR_INVALID_ARG) {
         ESP_LOGW(TAG, "wifi time init not ready: %s", esp_err_to_name(time_ret));
