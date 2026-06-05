@@ -1,0 +1,27 @@
+menu "System Dashboard"
+
+    config DASHBOARD_WIFI_SSID
+        string "WiFi SSID"
+        default "Xiaomi_185E"
+        help
+            WiFi network name used by the dashboard SNTP clock.
+
+    config DASHBOARD_WIFI_PASSWORD
+        string "WiFi password"
+        default "sy.315210"
+        help
+            WiFi password used by the dashboard SNTP clock.
+
+    config DASHBOARD_TIMEZONE
+        string "Timezone"
+        default "CST-8"
+        help
+            POSIX timezone string. China Standard Time is CST-8.
+
+    config DASHBOARD_SNTP_SERVER
+        string "SNTP server"
+        default "pool.ntp.org"
+        help
+            SNTP server used to synchronize local time.
+
+endmenu

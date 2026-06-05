@@ -1,4 +1,4 @@
 idf_component_register(
     SRCS main.c
     INCLUDE_DIRS .
-    REQUIRES lvgl__lvgl esp_timer log freertos)
+    REQUIRES system_dashboard wifi_time esp_timer lvgl__lvgl esp32_s3_touch_amoled_1_75c)
