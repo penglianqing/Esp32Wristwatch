@@ -61,6 +61,8 @@ static int32_t s_weather_temperature_c;
 static int32_t s_clock_cpu_history_value;
 static int32_t s_active_panel;
 static int32_t s_battery_percent = -1;
+static int32_t s_pending_panel_delta;
+static int32_t s_pending_panel_index = -1;
 
 static int32_t clamp_value(int32_t value, int32_t min, int32_t max)
 {
@@ -394,6 +396,44 @@ static void switch_panel(int32_t delta)
              active_panel_name(), s_active_panel);
 }
 
+static void show_panel(int32_t panel_index)
+{
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
+       panel_index == s_active_panel) {
+        return;
+    }
+
+    s_active_panel = panel_index;
+    refresh_panel_label();
+    update_metric_titles();
+    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+        set_metric_text(&s_metrics[i], metric_sample(i));
+    }
+    update_bottom_labels(esp_timer_get_time());
+    ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
+             active_panel_name(), s_active_panel);
+}
+
+static void apply_pending_panel_request(void)
+{
+    int32_t panel_index = -1;
+    int32_t panel_delta = 0;
+
+    portENTER_CRITICAL(&s_value_lock);
+    panel_index = s_pending_panel_index;
+    panel_delta = s_pending_panel_delta;
+    s_pending_panel_index = -1;
+    s_pending_panel_delta = 0;
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(panel_index >= 0) {
+        show_panel(panel_index);
+    }
+    else if(panel_delta != 0) {
+        switch_panel(panel_delta);
+    }
+}
+
 static void dashboard_gesture_cb(lv_event_t * event)
 {
     LV_UNUSED(event);
@@ -422,6 +462,8 @@ static void dashboard_update_task(void * arg)
     while(1) {
         if(bsp_display_lock(500)) {
             int64_t now_us = esp_timer_get_time();
+
+            apply_pending_panel_request();
 
             if(now_us - last_sample_us >= (int64_t)data_refresh_ms() * 1000) {
                 last_sample_us = now_us;
@@ -483,9 +525,26 @@ static void style_plain(lv_obj_t * obj)
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, LV_PART_MAIN);
 }
 
+static void enable_gesture_bubble(lv_obj_t * obj)
+{
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_GESTURE_BUBBLE);
+}
+
+static void configure_gesture_input(void)
+{
+    lv_indev_t * indev = bsp_display_get_input_dev();
+    if(indev == NULL) {
+        return;
+    }
+
+    lv_indev_set_gesture_min_distance(indev, 28);
+    lv_indev_set_gesture_min_velocity(indev, 3);
+}
+
 static lv_obj_t * create_bottom_mask(lv_obj_t * parent)
 {
     lv_obj_t * mask = lv_arc_create(parent);
+    enable_gesture_bubble(mask);
     lv_obj_set_size(mask, 440, 440);
     lv_obj_center(mask);
     lv_arc_set_bg_angles(mask, 65, 115);
@@ -504,6 +563,7 @@ static lv_obj_t * create_label(lv_obj_t * parent, const char * text, const lv_fo
                                lv_color_t color, lv_align_t align, int32_t x, int32_t y)
 {
     lv_obj_t * label = lv_label_create(parent);
+    enable_gesture_bubble(label);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_font(label, font ? font : LV_FONT_DEFAULT, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, color, LV_PART_MAIN);
@@ -523,6 +583,7 @@ static void create_metric_ring(lv_obj_t * parent, metric_t * metric,
     metric->arc_value = cfg->value;
 
     metric->arc = lv_arc_create(parent);
+    enable_gesture_bubble(metric->arc);
     lv_obj_set_size(metric->arc, cfg->ring_size, cfg->ring_size);
     lv_obj_center(metric->arc);
     lv_arc_set_range(metric->arc, 0, 100);
@@ -543,6 +604,7 @@ static lv_obj_t * create_sweep_arc(lv_obj_t * parent, int32_t size, int32_t widt
                                    lv_color_t color, int32_t angle)
 {
     lv_obj_t * arc = lv_arc_create(parent);
+    enable_gesture_bubble(arc);
     lv_obj_set_size(arc, size, size);
     lv_obj_center(arc);
     lv_arc_set_range(arc, 0, 100);
@@ -562,6 +624,7 @@ static lv_obj_t * create_sweep_arc(lv_obj_t * parent, int32_t size, int32_t widt
 static void create_history(lv_obj_t * parent, metric_t * metric, int32_t y)
 {
     lv_obj_t * wrap = lv_obj_create(parent);
+    enable_gesture_bubble(wrap);
     lv_obj_set_size(wrap, HISTORY_WRAP_W, HISTORY_BAR_H);
     style_plain(wrap);
     lv_obj_align(wrap, LV_ALIGN_BOTTOM_MID, 0, y);
@@ -571,6 +634,7 @@ static void create_history(lv_obj_t * parent, metric_t * metric, int32_t y)
 
     for(int i = 0; i < HISTORY_COUNT; i++) {
         metric->bars[i] = lv_bar_create(wrap);
+        enable_gesture_bubble(metric->bars[i]);
         lv_obj_set_size(metric->bars[i], HISTORY_BAR_W, HISTORY_BAR_H);
         lv_bar_set_range(metric->bars[i], 0, 100);
         lv_bar_set_value(metric->bars[i], metric->value, LV_ANIM_OFF);
@@ -588,6 +652,7 @@ static void create_dashboard(void)
 {
     lv_obj_t * screen = lv_screen_active();
     lv_obj_clean(screen);
+    configure_gesture_input();
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -659,7 +724,7 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
 
     memcpy(&s_config, config, sizeof(s_config));
     if(s_config.brand_name == NULL) s_config.brand_name = "";
-    if(s_config.weather_text == NULL) s_config.weather_text = "Beijing --";
+    if(s_config.weather_text == NULL) s_config.weather_text = "--";
     snprintf(s_weather_text, sizeof(s_weather_text), "%s", s_config.weather_text);
     int32_t initial_temp_c = 0;
     if(parse_weather_temperature(s_config.weather_text, &initial_temp_c)) {
@@ -782,6 +847,25 @@ void sys_dashboard_set_battery_percent(int32_t percent)
         update_battery_label();
         bsp_display_unlock();
     }
+}
+
+void sys_dashboard_next_panel(void)
+{
+    portENTER_CRITICAL(&s_value_lock);
+    s_pending_panel_delta++;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_show_panel(int32_t panel_index)
+{
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_pending_panel_index = panel_index;
+    s_pending_panel_delta = 0;
+    portEXIT_CRITICAL(&s_value_lock);
 }
 
 void sys_dashboard_set_metric_value(int32_t index, int32_t value)

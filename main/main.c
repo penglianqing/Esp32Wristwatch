@@ -1,10 +1,14 @@
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <time.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 #include "lvgl.h"
 #include "bsp/esp-bsp.h"
@@ -110,6 +114,10 @@
 #endif
 
 static const char * TAG = "main";
+#define BOOT_BUTTON_GPIO GPIO_NUM_0
+#define BOOT_BUTTON_POLL_MS 20
+#define BOOT_BUTTON_DEBOUNCE_MS 60
+#define BOOT_BUTTON_TASK_STACK 4096
 
 static void dashboard_time_text(char * buf, size_t buf_size, void * user_ctx)
 {
@@ -131,6 +139,56 @@ static void dashboard_battery_update(int32_t percent, void * user_ctx)
 {
     (void)user_ctx;
     sys_dashboard_set_battery_percent(percent);
+}
+
+static void dashboard_power_button_press(void * user_ctx)
+{
+    (void)user_ctx;
+    sys_dashboard_show_panel(0);
+}
+
+static void boot_button_task(void * arg)
+{
+    (void)arg;
+    bool was_pressed = gpio_get_level(BOOT_BUTTON_GPIO) == 0;
+    uint32_t stable_ticks = 0;
+
+    while(1) {
+        bool pressed = gpio_get_level(BOOT_BUTTON_GPIO) == 0;
+
+        if(pressed == was_pressed) {
+            stable_ticks += BOOT_BUTTON_POLL_MS;
+        }
+        else {
+            stable_ticks = 0;
+            was_pressed = pressed;
+        }
+
+        if(pressed && stable_ticks == BOOT_BUTTON_DEBOUNCE_MS) {
+            sys_dashboard_next_panel();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(BOOT_BUTTON_POLL_MS));
+    }
+}
+
+static esp_err_t boot_button_start(void)
+{
+    const gpio_config_t boot_button = {
+        .pin_bit_mask = 1ULL << BOOT_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    esp_err_t ret = gpio_config(&boot_button);
+    if(ret != ESP_OK) {
+        return ret;
+    }
+
+    BaseType_t task_ok = xTaskCreate(boot_button_task, "boot_button", BOOT_BUTTON_TASK_STACK, NULL, 5, NULL);
+    return task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 void app_main(void)
@@ -167,7 +225,7 @@ void app_main(void)
         .panel_names = {"Time", "FnOS", "Windows11"},
         .default_panel_index = 0,
         .battery_percent = -1,
-        .weather_text = "Beijing --",
+        .weather_text = "--",
         .time_text = "--:--",
         .time_cb = dashboard_time_text,
         .history_metric_index = 0,
@@ -224,6 +282,12 @@ void app_main(void)
 
     sys_dashboard_start(&dashboard);
 
+    esp_err_t button_ret = boot_button_start();
+    if(button_ret != ESP_OK) {
+        ESP_LOGW(TAG, "boot button init not ready: %s", esp_err_to_name(button_ret));
+    }
+
+    power_monitor_set_power_button_cb(dashboard_power_button_press, NULL);
     esp_err_t power_ret = power_monitor_start(dashboard_battery_update, NULL);
     if(power_ret != ESP_OK && power_ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "power monitor init not ready: %s", esp_err_to_name(power_ret));

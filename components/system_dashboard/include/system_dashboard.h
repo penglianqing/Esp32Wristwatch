@@ -58,6 +58,8 @@ void sys_dashboard_set_panel_rx_value(int32_t panel_index, int32_t value);
 void sys_dashboard_set_weather_text(const char * text);
 void sys_dashboard_set_weather_temperature(int32_t celsius);
 void sys_dashboard_set_battery_percent(int32_t percent);
+void sys_dashboard_next_panel(void);
+void sys_dashboard_show_panel(int32_t panel_index);
 void sys_dashboard_set_metric_value(int32_t index, int32_t value);
 void sys_dashboard_set_tx_value(int32_t value);
 void sys_dashboard_set_rx_value(int32_t value);

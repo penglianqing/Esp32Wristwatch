@@ -6,6 +6,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "bsp/esp-bsp.h"
@@ -21,6 +22,8 @@ static XPowersPMU s_pmu;
 static i2c_master_dev_handle_t s_pmu_dev;
 static power_monitor_battery_cb_t s_battery_cb;
 static void * s_battery_user_ctx;
+static power_monitor_power_button_cb_t s_power_button_cb;
+static void * s_power_button_user_ctx;
 static TaskHandle_t s_task_handle;
 static bool s_ready;
 
@@ -62,13 +65,25 @@ static int32_t read_battery_percent(void)
 static void power_monitor_task(void * arg)
 {
     (void)arg;
+    int64_t last_battery_sample_ms = -(int64_t)SAMPLE_PERIOD_MS;
 
     while(true) {
-        int32_t percent = read_battery_percent();
-        if(s_battery_cb != nullptr) {
-            s_battery_cb(percent, s_battery_user_ctx);
+        s_pmu.getIrqStatus();
+        if(s_pmu.isPekeyShortPressIrq() && s_power_button_cb != nullptr) {
+            s_power_button_cb(s_power_button_user_ctx);
         }
-        vTaskDelay(pdMS_TO_TICKS(SAMPLE_PERIOD_MS));
+        s_pmu.clearIrqStatus();
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if(now_ms - last_battery_sample_ms >= SAMPLE_PERIOD_MS) {
+            last_battery_sample_ms = now_ms;
+            int32_t percent = read_battery_percent();
+            if(s_battery_cb != nullptr) {
+                s_battery_cb(percent, s_battery_user_ctx);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -98,6 +113,7 @@ static esp_err_t init_pmu(void)
 
     s_pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     s_pmu.clearIrqStatus();
+    s_pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
     s_pmu.enableBattDetection();
     s_pmu.enableBattVoltageMeasure();
     s_pmu.enableVbusVoltageMeasure();
@@ -141,4 +157,10 @@ extern "C" esp_err_t power_monitor_start(power_monitor_battery_cb_t battery_cb, 
 extern "C" int32_t power_monitor_get_battery_percent(void)
 {
     return read_battery_percent();
+}
+
+extern "C" void power_monitor_set_power_button_cb(power_monitor_power_button_cb_t power_button_cb, void * user_ctx)
+{
+    s_power_button_cb = power_button_cb;
+    s_power_button_user_ctx = user_ctx;
 }

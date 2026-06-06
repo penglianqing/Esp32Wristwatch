@@ -96,6 +96,6 @@ action:
             data:
               topic: esp32/dial/weather/state
               payload: >-
-                Beijing {{ states('weather.chaoyang') }}
+                {{ states('weather.chaoyang') }}
                 {{ state_attr('weather.chaoyang', 'temperature') | float(0) | round(0) }}C
               retain: true
