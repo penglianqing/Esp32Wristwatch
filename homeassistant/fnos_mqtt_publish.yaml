@@ -1,0 +1,101 @@
+# Add this automation to Home Assistant after the MQTT integration is configured.
+# It republishes FnOS sensor states for the ESP32 dashboard.
+
+alias: Publish dashboard sensors
+description: Publish FnOS and Windows11 sensor states to ESP32 dashboard MQTT topics.
+mode: queued
+trigger:
+  - platform: state
+    entity_id:
+      - sensor.fnos_fnos_cpu_util
+      - sensor.fnos_fnos_mem_util
+      - sensor.fnos_fnos_gpu_util
+      - sensor.fnos_wan_tx
+      - sensor.fnos_wan_rx
+      - sensor.desktop_07gfjr9_desktop_07gfjr9_cpu_load
+      - sensor.desktop_07gfjr9_desktop_07gfjr9_gpu_load
+      - sensor.desktop_07gfjr9_desktop_07gfjr9_memory_usage
+      - sensor.desktop_07gfjr9_network_upload_speed_2
+      - sensor.desktop_07gfjr9_network_download_speed_2
+      - weather.chaoyang
+action:
+  - choose:
+      - conditions: "{{ trigger.entity_id == 'sensor.fnos_fnos_cpu_util' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/fnos/cpu/state
+              payload: "{{ states('sensor.fnos_fnos_cpu_util') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.fnos_fnos_mem_util' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/fnos/mem/state
+              payload: "{{ states('sensor.fnos_fnos_mem_util') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.fnos_fnos_gpu_util' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/fnos/gpu/state
+              payload: "{{ states('sensor.fnos_fnos_gpu_util') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.fnos_wan_tx' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/fnos/tx/state
+              payload: "{{ states('sensor.fnos_wan_tx') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.fnos_wan_rx' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/fnos/rx/state
+              payload: "{{ states('sensor.fnos_wan_rx') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.desktop_07gfjr9_desktop_07gfjr9_cpu_load' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/windows11/cpu/state
+              payload: "{{ states('sensor.desktop_07gfjr9_desktop_07gfjr9_cpu_load') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.desktop_07gfjr9_desktop_07gfjr9_memory_usage' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/windows11/mem/state
+              payload: "{{ states('sensor.desktop_07gfjr9_desktop_07gfjr9_memory_usage') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.desktop_07gfjr9_desktop_07gfjr9_gpu_load' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/windows11/gpu/state
+              payload: "{{ states('sensor.desktop_07gfjr9_desktop_07gfjr9_gpu_load') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.desktop_07gfjr9_network_upload_speed_2' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/windows11/tx/state
+              payload: "{{ states('sensor.desktop_07gfjr9_network_upload_speed_2') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'sensor.desktop_07gfjr9_network_download_speed_2' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/windows11/rx/state
+              payload: "{{ states('sensor.desktop_07gfjr9_network_download_speed_2') | float(0) | round(0) }}"
+              retain: true
+      - conditions: "{{ trigger.entity_id == 'weather.chaoyang' }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: esp32/dial/weather/state
+              payload: >-
+                Beijing {{ states('weather.chaoyang') }}
+                {{ state_attr('weather.chaoyang', 'temperature') | float(0) | round(0) }}C
+              retain: true

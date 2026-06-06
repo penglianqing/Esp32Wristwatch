@@ -54,4 +54,66 @@ menu "System Dashboard"
         help
             SNTP server used to synchronize local time.
 
+    config DASHBOARD_MQTT_URI
+        string "MQTT broker URI"
+        default "mqtt://192.168.1.214:1883"
+        help
+            MQTT broker URI, for example mqtt://192.168.1.10:1883. Leave empty to keep mock data.
+
+    config DASHBOARD_MQTT_USERNAME
+        string "MQTT username"
+        default "esp32"
+
+    config DASHBOARD_MQTT_PASSWORD
+        string "MQTT password"
+        default "passwd"
+
+    config DASHBOARD_MQTT_CLIENT_ID
+        string "MQTT client id"
+        default "fnos-dashboard"
+
+    config DASHBOARD_MQTT_FNOS_CPU_TOPIC
+        string "FnOS CPU MQTT topic"
+        default "esp32/fnos/cpu/state"
+
+    config DASHBOARD_MQTT_FNOS_MEM_TOPIC
+        string "FnOS MEM MQTT topic"
+        default "esp32/fnos/mem/state"
+
+    config DASHBOARD_MQTT_FNOS_GPU_TOPIC
+        string "FnOS GPU MQTT topic"
+        default "esp32/fnos/gpu/state"
+
+    config DASHBOARD_MQTT_FNOS_TX_TOPIC
+        string "FnOS TX MQTT topic"
+        default "esp32/fnos/tx/state"
+
+    config DASHBOARD_MQTT_FNOS_RX_TOPIC
+        string "FnOS RX MQTT topic"
+        default "esp32/fnos/rx/state"
+
+    config DASHBOARD_MQTT_WIN_CPU_TOPIC
+        string "Windows11 CPU MQTT topic"
+        default "esp32/windows11/cpu/state"
+
+    config DASHBOARD_MQTT_WIN_MEM_TOPIC
+        string "Windows11 MEM MQTT topic"
+        default "esp32/windows11/mem/state"
+
+    config DASHBOARD_MQTT_WIN_GPU_TOPIC
+        string "Windows11 GPU MQTT topic"
+        default "esp32/windows11/gpu/state"
+
+    config DASHBOARD_MQTT_WIN_TX_TOPIC
+        string "Windows11 TX MQTT topic"
+        default "esp32/windows11/tx/state"
+
+    config DASHBOARD_MQTT_WIN_RX_TOPIC
+        string "Windows11 RX MQTT topic"
+        default "esp32/windows11/rx/state"
+
+    config DASHBOARD_MQTT_WEATHER_TOPIC
+        string "DIAL weather MQTT topic"
+        default "esp32/dial/weather/state"
+
 endmenu

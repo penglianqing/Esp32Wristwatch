@@ -1,6 +1,9 @@
 #include "system_dashboard.h"
 
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,6 +31,7 @@ typedef struct {
     const char * unit;
     lv_color_t color;
     lv_obj_t * arc;
+    lv_obj_t * name_label;
     lv_obj_t * value_label;
     lv_obj_t * bars[HISTORY_COUNT];
     int32_t value;
@@ -40,7 +44,27 @@ static metric_t s_metrics[SYS_DASHBOARD_METRIC_COUNT];
 static lv_obj_t * s_uptime_label;
 static lv_obj_t * s_upload_label;
 static lv_obj_t * s_download_label;
+static lv_obj_t * s_brand_label;
 static lv_obj_t * s_bg_sweep[4];
+static portMUX_TYPE s_value_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_metric_external_valid[SYS_DASHBOARD_PANEL_COUNT][SYS_DASHBOARD_METRIC_COUNT];
+static int32_t s_metric_external_value[SYS_DASHBOARD_PANEL_COUNT][SYS_DASHBOARD_METRIC_COUNT];
+static bool s_tx_external_valid[SYS_DASHBOARD_PANEL_COUNT];
+static int32_t s_tx_external_value[SYS_DASHBOARD_PANEL_COUNT];
+static bool s_rx_external_valid[SYS_DASHBOARD_PANEL_COUNT];
+static int32_t s_rx_external_value[SYS_DASHBOARD_PANEL_COUNT];
+static char s_weather_text[64];
+static bool s_weather_temperature_valid;
+static int32_t s_weather_temperature_c;
+static int32_t s_clock_cpu_history_value;
+static int32_t s_active_panel;
+
+static int32_t clamp_value(int32_t value, int32_t min, int32_t max)
+{
+    if(value < min) return min;
+    if(value > max) return max;
+    return value;
+}
 
 static uint32_t frame_delay_ms(void)
 {
@@ -54,11 +78,98 @@ static uint32_t data_refresh_ms(void)
     return s_config.data_refresh_ms ? s_config.data_refresh_ms : 1000;
 }
 
+static const char * active_panel_name(void)
+{
+    const char * name = s_config.panel_names[s_active_panel];
+    return name ? name : s_config.brand_name;
+}
+
+static bool clock_panel_active(void)
+{
+    return s_active_panel == 0;
+}
+
+static bool get_local_time(struct tm * timeinfo)
+{
+    time_t now = 0;
+    time(&now);
+    if(now < 1700000000) {
+        int64_t sec = esp_timer_get_time() / 1000000;
+        memset(timeinfo, 0, sizeof(*timeinfo));
+        timeinfo->tm_hour = (int)((sec / 3600) % 24);
+        timeinfo->tm_min = (int)((sec / 60) % 60);
+        timeinfo->tm_sec = (int)(sec % 60);
+        return false;
+    }
+
+    return localtime_r(&now, timeinfo) != NULL;
+}
+
+static int32_t clock_value(int32_t index)
+{
+    struct tm timeinfo = {0};
+    get_local_time(&timeinfo);
+
+    if(index == 0) return timeinfo.tm_hour;
+    if(index == 1) return timeinfo.tm_min;
+    return timeinfo.tm_sec;
+}
+
+static int32_t clock_arc_value(int32_t index, int32_t value)
+{
+    if(index == 0) return (value * 100) / 24;
+    return (value * 100) / 60;
+}
+
+static bool parse_weather_temperature(const char * text, int32_t * out_celsius)
+{
+    if(text == NULL) {
+        return false;
+    }
+
+    bool found = false;
+    int32_t last_value = 0;
+    const char * p = text;
+
+    while(*p != '\0') {
+        if((*p >= '0' && *p <= '9') ||
+           ((*p == '-' || *p == '+') && p[1] >= '0' && p[1] <= '9')) {
+            char * end = NULL;
+            long value = strtol(p, &end, 10);
+            if(end != p) {
+                last_value = (int32_t)value;
+                found = true;
+                p = end;
+                continue;
+            }
+        }
+        p++;
+    }
+
+    if(found && out_celsius != NULL) {
+        *out_celsius = last_value;
+    }
+    return found;
+}
+
+static const char * metric_title(int32_t index)
+{
+    static const char * clock_titles[SYS_DASHBOARD_METRIC_COUNT] = {"HOUR", "MIN", "SEC"};
+    return clock_panel_active() ? clock_titles[index] : s_config.metrics[index].name;
+}
+
 static void set_metric_text(metric_t * metric, int32_t value)
 {
+    int32_t index = (int32_t)(metric - s_metrics);
     metric->value = value;
-    metric->target = value;
-    lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
+    if(clock_panel_active()) {
+        metric->target = clock_arc_value(index, value);
+        lv_label_set_text_fmt(metric->value_label, "%02" LV_PRId32, value);
+    }
+    else {
+        metric->target = value;
+        lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
+    }
 }
 
 static void set_metric_arc_value(metric_t * metric, int32_t value)
@@ -98,18 +209,93 @@ static int32_t next_speed(const sys_dashboard_speed_config_t * speed)
     return min + (int32_t)lv_rand(0, (uint32_t)(max - min));
 }
 
+static int32_t metric_sample(int32_t index)
+{
+    if(clock_panel_active()) {
+        return clock_value(index);
+    }
+
+    int32_t value = 0;
+    bool has_external = false;
+
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_active_panel > 0 && s_metric_external_valid[s_active_panel][index];
+    value = s_metric_external_value[s_active_panel][index];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(has_external) {
+        return clamp_value(value, 0, 100);
+    }
+
+    return next_value(&s_config.metrics[index], s_metrics[index].value);
+}
+
+static int32_t tx_sample(void)
+{
+    if(clock_panel_active()) {
+        return 0;
+    }
+
+    int32_t value = 0;
+    bool has_external = false;
+
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_active_panel > 0 && s_tx_external_valid[s_active_panel];
+    value = s_tx_external_value[s_active_panel];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    return has_external ? value : next_speed(&s_config.tx);
+}
+
+static int32_t rx_sample(void)
+{
+    if(clock_panel_active()) {
+        return 0;
+    }
+
+    int32_t value = 0;
+    bool has_external = false;
+
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_active_panel > 0 && s_rx_external_valid[s_active_panel];
+    value = s_rx_external_value[s_active_panel];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    return has_external ? value : next_speed(&s_config.rx);
+}
+
+static void push_history_bars(lv_obj_t ** bars, int32_t value)
+{
+    if(bars == NULL || bars[0] == NULL) {
+        return;
+    }
+
+    for(int i = 0; i < HISTORY_COUNT - 1; i++) {
+        int32_t old_value = lv_bar_get_value(bars[i + 1]);
+        lv_bar_set_value(bars[i], old_value, LV_ANIM_OFF);
+    }
+
+    lv_bar_set_value(bars[HISTORY_COUNT - 1], value, LV_ANIM_OFF);
+}
+
 static void push_history(metric_t * metric, int32_t value)
+{
+    if(metric == NULL) {
+        return;
+    }
+
+    push_history_bars(metric->bars, value);
+}
+
+static void set_history_color(metric_t * metric, lv_color_t color)
 {
     if(metric == NULL || metric->bars[0] == NULL) {
         return;
     }
 
-    for(int i = 0; i < HISTORY_COUNT - 1; i++) {
-        int32_t old_value = lv_bar_get_value(metric->bars[i + 1]);
-        lv_bar_set_value(metric->bars[i], old_value, LV_ANIM_OFF);
+    for(int i = 0; i < HISTORY_COUNT; i++) {
+        lv_obj_set_style_bg_color(metric->bars[i], color, LV_PART_INDICATOR);
     }
-
-    lv_bar_set_value(metric->bars[HISTORY_COUNT - 1], value, LV_ANIM_OFF);
 }
 
 static void update_time_label(int64_t now_us)
@@ -122,6 +308,89 @@ static void update_time_label(int64_t now_us)
     else {
         int64_t sec = now_us / 1000000;
         lv_label_set_text_fmt(s_uptime_label, "%02lld:%02lld", sec / 60, sec % 60);
+    }
+}
+
+static void update_metric_titles(void)
+{
+    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+        if(s_metrics[i].name_label != NULL) {
+            lv_label_set_text(s_metrics[i].name_label, metric_title(i));
+        }
+    }
+}
+
+static void update_bottom_labels(int64_t now_us)
+{
+    if(clock_panel_active()) {
+        char weather_buf[64];
+        struct tm timeinfo = {0};
+        if(get_local_time(&timeinfo)) {
+            char date_buf[32];
+            strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %a", &timeinfo);
+            lv_label_set_text(s_upload_label, date_buf);
+        }
+        else {
+            int64_t sec = now_us / 1000000;
+            lv_label_set_text_fmt(s_upload_label, "Uptime %02lld:%02lld:%02lld",
+                                  sec / 3600, (sec / 60) % 60, sec % 60);
+        }
+        portENTER_CRITICAL(&s_value_lock);
+        snprintf(weather_buf, sizeof(weather_buf), "%s", s_weather_text);
+        portEXIT_CRITICAL(&s_value_lock);
+        lv_label_set_text(s_download_label, weather_buf);
+        return;
+    }
+
+    lv_label_set_text_fmt(s_upload_label, "%s : %" LV_PRId32 "%s",
+                          s_config.tx.name, tx_sample(), s_config.tx.unit);
+    lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
+                          s_config.rx.name, rx_sample(), s_config.rx.unit);
+}
+
+static void refresh_panel_label(void)
+{
+    if(s_brand_label != NULL) {
+        lv_label_set_text(s_brand_label, active_panel_name());
+    }
+}
+
+static void switch_panel(int32_t delta)
+{
+    int32_t next = (s_active_panel + delta) % SYS_DASHBOARD_PANEL_COUNT;
+    if(next < 0) {
+        next += SYS_DASHBOARD_PANEL_COUNT;
+    }
+
+    if(next == s_active_panel) {
+        return;
+    }
+
+    s_active_panel = next;
+    refresh_panel_label();
+    update_metric_titles();
+    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+        set_metric_text(&s_metrics[i], metric_sample(i));
+    }
+    update_bottom_labels(esp_timer_get_time());
+    ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
+             active_panel_name(), s_active_panel);
+}
+
+static void dashboard_gesture_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    lv_indev_t * indev = lv_indev_active();
+    if(indev == NULL) {
+        return;
+    }
+
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if(dir == LV_DIR_LEFT) {
+        switch_panel(1);
+    }
+    else if(dir == LV_DIR_RIGHT) {
+        switch_panel(-1);
     }
 }
 
@@ -140,19 +409,24 @@ static void dashboard_update_task(void * arg)
             if(now_us - last_sample_us >= (int64_t)data_refresh_ms() * 1000) {
                 last_sample_us = now_us;
                 for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-                    set_metric_text(&s_metrics[i], next_value(&s_config.metrics[i], s_metrics[i].value));
+                    set_metric_text(&s_metrics[i], metric_sample(i));
                 }
 
                 if(s_config.history_metric_index >= 0 &&
                    s_config.history_metric_index < SYS_DASHBOARD_METRIC_COUNT) {
                     metric_t * history_metric = &s_metrics[s_config.history_metric_index];
-                    push_history(history_metric, history_metric->target);
+                    if(clock_panel_active()) {
+                        s_clock_cpu_history_value = next_value(&s_config.metrics[0], s_clock_cpu_history_value);
+                        set_history_color(history_metric, s_config.metrics[0].color);
+                        push_history(history_metric, s_clock_cpu_history_value);
+                    }
+                    else {
+                        set_history_color(history_metric, history_metric->color);
+                        push_history(history_metric, history_metric->target);
+                    }
                 }
 
-                lv_label_set_text_fmt(s_upload_label, "%s : %" LV_PRId32 "%s",
-                                      s_config.tx.name, next_speed(&s_config.tx), s_config.tx.unit);
-                lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
-                                      s_config.rx.name, next_speed(&s_config.rx), s_config.rx.unit);
+                update_bottom_labels(now_us);
                 update_time_label(now_us);
             }
 
@@ -300,6 +574,7 @@ static void create_dashboard(void)
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(screen, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     lv_obj_t * face = lv_obj_create(screen);
     lv_obj_set_size(face, SCREEN_SIZE, SCREEN_SIZE);
@@ -311,6 +586,7 @@ static void create_dashboard(void)
     lv_obj_set_style_bg_opa(face, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(face, 0, LV_PART_MAIN);
     lv_obj_remove_flag(face, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(face, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
 
     s_bg_sweep[0] = create_sweep_arc(face, 450, 3, lv_color_hex(0x19d6b4), 0);
     s_bg_sweep[1] = create_sweep_arc(face, 365, 2, lv_color_hex(0xffc857), 120);
@@ -325,12 +601,12 @@ static void create_dashboard(void)
     const int32_t tag_y[SYS_DASHBOARD_METRIC_COUNT] = {-86, -18, 50};
     const int32_t value_y[SYS_DASHBOARD_METRIC_COUNT] = {-62, 6, 74};
     for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-        create_label(face, s_metrics[i].name, &lv_font_montserrat_12, lv_color_hex(0x9da5af),
-                     LV_ALIGN_CENTER, 0, tag_y[i]);
+        s_metrics[i].name_label = create_label(face, metric_title(i), &lv_font_montserrat_12,
+                                               lv_color_hex(0x9da5af), LV_ALIGN_CENTER, 0, tag_y[i]);
         s_metrics[i].value_label = create_label(face, "", s_config.metrics[i].value_font,
                                                 s_metrics[i].color, LV_ALIGN_CENTER, 0, value_y[i]);
-        set_metric_text(&s_metrics[i], s_metrics[i].value);
-        set_metric_arc_value(&s_metrics[i], s_metrics[i].value);
+        set_metric_text(&s_metrics[i], metric_sample(i));
+        set_metric_arc_value(&s_metrics[i], s_metrics[i].target);
     }
 
     create_bottom_mask(face);
@@ -339,10 +615,7 @@ static void create_dashboard(void)
                                   lv_color_hex(0x9da5af), LV_ALIGN_BOTTOM_MID, 0, BOTTOM_TX_Y);
     s_download_label = create_label(face, "", &lv_font_montserrat_14,
                                     lv_color_hex(0x9da5af), LV_ALIGN_BOTTOM_MID, 0, BOTTOM_RX_Y);
-    lv_label_set_text_fmt(s_upload_label, "%s : %" LV_PRId32 "%s",
-                          s_config.tx.name, s_config.tx.value, s_config.tx.unit);
-    lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
-                          s_config.rx.name, s_config.rx.value, s_config.rx.unit);
+    update_bottom_labels(esp_timer_get_time());
 
     if(s_config.history_metric_index >= 0 &&
        s_config.history_metric_index < SYS_DASHBOARD_METRIC_COUNT) {
@@ -352,8 +625,8 @@ static void create_dashboard(void)
     s_uptime_label = create_label(face, s_config.time_text, &lv_font_montserrat_12,
                                   lv_color_hex(0xf5f7fb), LV_ALIGN_BOTTOM_MID, 0, BOTTOM_TIME_Y);
     update_time_label(esp_timer_get_time());
-    create_label(face, s_config.brand_name, &lv_font_montserrat_18, lv_color_hex(0xf5f7fb),
-                 LV_ALIGN_BOTTOM_MID, 0, BOTTOM_BRAND_Y);
+    s_brand_label = create_label(face, active_panel_name(), &lv_font_montserrat_18, lv_color_hex(0xf5f7fb),
+                                 LV_ALIGN_BOTTOM_MID, 0, BOTTOM_BRAND_Y);
 }
 
 void sys_dashboard_start(const sys_dashboard_config_t * config)
@@ -365,6 +638,21 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
 
     memcpy(&s_config, config, sizeof(s_config));
     if(s_config.brand_name == NULL) s_config.brand_name = "";
+    if(s_config.weather_text == NULL) s_config.weather_text = "Beijing --";
+    snprintf(s_weather_text, sizeof(s_weather_text), "%s", s_config.weather_text);
+    int32_t initial_temp_c = 0;
+    if(parse_weather_temperature(s_config.weather_text, &initial_temp_c)) {
+        s_weather_temperature_c = initial_temp_c;
+        s_weather_temperature_valid = true;
+    }
+    if(s_config.default_panel_index < 0 || s_config.default_panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        s_config.default_panel_index = 0;
+    }
+    s_clock_cpu_history_value = s_config.metrics[0].value;
+    s_active_panel = s_config.default_panel_index;
+    if(s_config.panel_names[0] == NULL) s_config.panel_names[0] = s_config.brand_name;
+    if(s_config.panel_names[1] == NULL) s_config.panel_names[1] = "FnOS";
+    if(s_config.panel_names[2] == NULL) s_config.panel_names[2] = "Windows11";
     if(s_config.time_text == NULL) s_config.time_text = "00:00";
     if(s_config.tx.name == NULL) s_config.tx.name = "TX";
     if(s_config.tx.unit == NULL) s_config.tx.unit = "Mbps";
@@ -396,4 +684,82 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
     if(task_ok != pdPASS) {
         ESP_LOGE(TAG, "failed to create dashboard update task");
     }
+}
+
+void sys_dashboard_set_panel_metric_value(int32_t panel_index, int32_t metric_index, int32_t value)
+{
+    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
+       metric_index < 0 || metric_index >= SYS_DASHBOARD_METRIC_COUNT) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_metric_external_value[panel_index][metric_index] = value;
+    s_metric_external_valid[panel_index][metric_index] = true;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_panel_tx_value(int32_t panel_index, int32_t value)
+{
+    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_tx_external_value[panel_index] = value;
+    s_tx_external_valid[panel_index] = true;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_panel_rx_value(int32_t panel_index, int32_t value)
+{
+    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_rx_external_value[panel_index] = value;
+    s_rx_external_valid[panel_index] = true;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_weather_text(const char * text)
+{
+    if(text == NULL || text[0] == '\0') {
+        return;
+    }
+
+    int32_t temp_c = 0;
+    bool has_temp = parse_weather_temperature(text, &temp_c);
+
+    portENTER_CRITICAL(&s_value_lock);
+    snprintf(s_weather_text, sizeof(s_weather_text), "%s", text);
+    if(has_temp) {
+        s_weather_temperature_c = temp_c;
+        s_weather_temperature_valid = true;
+    }
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_weather_temperature(int32_t celsius)
+{
+    portENTER_CRITICAL(&s_value_lock);
+    s_weather_temperature_c = celsius;
+    s_weather_temperature_valid = true;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_metric_value(int32_t index, int32_t value)
+{
+    sys_dashboard_set_panel_metric_value(1, index, value);
+}
+
+void sys_dashboard_set_tx_value(int32_t value)
+{
+    sys_dashboard_set_panel_tx_value(1, value);
+}
+
+void sys_dashboard_set_rx_value(int32_t value)
+{
+    sys_dashboard_set_panel_rx_value(1, value);
 }
