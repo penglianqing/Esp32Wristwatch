@@ -23,6 +23,7 @@
 #define BOTTOM_HISTORY_Y (-50)
 #define BOTTOM_BRAND_Y (-22)
 #define BOTTOM_TIME_Y (-2)
+#define TOP_BATTERY_Y (-2)
 
 static const char *TAG = "sys_dash";
 
@@ -45,6 +46,7 @@ static lv_obj_t * s_uptime_label;
 static lv_obj_t * s_upload_label;
 static lv_obj_t * s_download_label;
 static lv_obj_t * s_brand_label;
+static lv_obj_t * s_battery_label;
 static lv_obj_t * s_bg_sweep[4];
 static portMUX_TYPE s_value_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_metric_external_valid[SYS_DASHBOARD_PANEL_COUNT][SYS_DASHBOARD_METRIC_COUNT];
@@ -58,6 +60,7 @@ static bool s_weather_temperature_valid;
 static int32_t s_weather_temperature_c;
 static int32_t s_clock_cpu_history_value;
 static int32_t s_active_panel;
+static int32_t s_battery_percent = -1;
 
 static int32_t clamp_value(int32_t value, int32_t min, int32_t max)
 {
@@ -355,6 +358,20 @@ static void refresh_panel_label(void)
     }
 }
 
+static void update_battery_label(void)
+{
+    if(s_battery_label == NULL) {
+        return;
+    }
+
+    if(s_battery_percent < 0) {
+        lv_label_set_text(s_battery_label, "--%");
+        return;
+    }
+
+    lv_label_set_text_fmt(s_battery_label, " %" LV_PRId32 "%%", s_battery_percent);
+}
+
 static void switch_panel(int32_t delta)
 {
     int32_t next = (s_active_panel + delta) % SYS_DASHBOARD_PANEL_COUNT;
@@ -594,6 +611,10 @@ static void create_dashboard(void)
     s_bg_sweep[3] = create_sweep_arc(face, 212, 2, lv_color_hex(0xffffff), 180);
     lv_obj_set_style_arc_opa(s_bg_sweep[3], LV_OPA_30, LV_PART_MAIN);
 
+    s_battery_label = create_label(face, "", &lv_font_montserrat_14,
+                                   lv_color_hex(0xf5f7fb), LV_ALIGN_TOP_MID, 0, TOP_BATTERY_Y);
+    update_battery_label();
+
     for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
         create_metric_ring(face, &s_metrics[i], &s_config.metrics[i]);
     }
@@ -648,6 +669,7 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
     if(s_config.default_panel_index < 0 || s_config.default_panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
         s_config.default_panel_index = 0;
     }
+    s_battery_percent = clamp_value(s_config.battery_percent, -1, 100);
     s_clock_cpu_history_value = s_config.metrics[0].value;
     s_active_panel = s_config.default_panel_index;
     if(s_config.panel_names[0] == NULL) s_config.panel_names[0] = s_config.brand_name;
@@ -747,6 +769,19 @@ void sys_dashboard_set_weather_temperature(int32_t celsius)
     s_weather_temperature_c = celsius;
     s_weather_temperature_valid = true;
     portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_battery_percent(int32_t percent)
+{
+    percent = clamp_value(percent, -1, 100);
+    portENTER_CRITICAL(&s_value_lock);
+    s_battery_percent = percent;
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(bsp_display_lock(100)) {
+        update_battery_label();
+        bsp_display_unlock();
+    }
 }
 
 void sys_dashboard_set_metric_value(int32_t index, int32_t value)

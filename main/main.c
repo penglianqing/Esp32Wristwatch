@@ -9,6 +9,7 @@
 #include "lvgl.h"
 #include "bsp/esp-bsp.h"
 #include "ha_mqtt.h"
+#include "power_monitor.h"
 #include "system_dashboard.h"
 #include "wifi_time.h"
 
@@ -126,6 +127,12 @@ static void dashboard_time_text(char * buf, size_t buf_size, void * user_ctx)
     strftime(buf, buf_size, "%H:%M:%S", &timeinfo);
 }
 
+static void dashboard_battery_update(int32_t percent, void * user_ctx)
+{
+    (void)user_ctx;
+    sys_dashboard_set_battery_percent(percent);
+}
+
 void app_main(void)
 {
     lv_rand_set_seed((uint32_t)esp_timer_get_time());
@@ -159,6 +166,7 @@ void app_main(void)
         .brand_name = "Time",
         .panel_names = {"Time", "FnOS", "Windows11"},
         .default_panel_index = 0,
+        .battery_percent = -1,
         .weather_text = "Beijing --",
         .time_text = "--:--",
         .time_cb = dashboard_time_text,
@@ -215,6 +223,11 @@ void app_main(void)
     };
 
     sys_dashboard_start(&dashboard);
+
+    esp_err_t power_ret = power_monitor_start(dashboard_battery_update, NULL);
+    if(power_ret != ESP_OK && power_ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "power monitor init not ready: %s", esp_err_to_name(power_ret));
+    }
 
     const ha_mqtt_config_t ha_mqtt = {
         .uri = CONFIG_DASHBOARD_MQTT_URI,
