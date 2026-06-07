@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define SYS_DASHBOARD_METRIC_COUNT 3
-#define SYS_DASHBOARD_PANEL_COUNT 4
+#define SYS_DASHBOARD_PANEL_COUNT 3
 
 typedef void (*sys_dashboard_time_cb_t)(char * buf, size_t buf_size, void * user_ctx);
 typedef void (*sys_dashboard_photo_click_cb_t)(void * user_ctx);

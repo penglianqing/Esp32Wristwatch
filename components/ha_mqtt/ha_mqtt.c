@@ -210,16 +210,16 @@ esp_err_t ha_mqtt_start(const ha_mqtt_config_t * config)
     }
 
     memcpy(&s_config, config, sizeof(s_config));
-    s_topics[0] = (ha_topic_map_t){s_config.fnos_cpu_topic, 1, HA_VALUE_CPU, "FnOS CPU"};
-    s_topics[1] = (ha_topic_map_t){s_config.fnos_mem_topic, 1, HA_VALUE_MEM, "FnOS MEM"};
-    s_topics[2] = (ha_topic_map_t){s_config.fnos_gpu_topic, 1, HA_VALUE_GPU, "FnOS GPU"};
-    s_topics[3] = (ha_topic_map_t){s_config.fnos_tx_topic, 1, HA_VALUE_TX, "FnOS TX"};
-    s_topics[4] = (ha_topic_map_t){s_config.fnos_rx_topic, 1, HA_VALUE_RX, "FnOS RX"};
-    s_topics[5] = (ha_topic_map_t){s_config.win_cpu_topic, 2, HA_VALUE_CPU, "Windows11 CPU"};
-    s_topics[6] = (ha_topic_map_t){s_config.win_mem_topic, 2, HA_VALUE_MEM, "Windows11 MEM"};
-    s_topics[7] = (ha_topic_map_t){s_config.win_gpu_topic, 2, HA_VALUE_GPU, "Windows11 GPU"};
-    s_topics[8] = (ha_topic_map_t){s_config.win_tx_topic, 2, HA_VALUE_TX, "Windows11 TX"};
-    s_topics[9] = (ha_topic_map_t){s_config.win_rx_topic, 2, HA_VALUE_RX, "Windows11 RX"};
+    s_topics[0] = (ha_topic_map_t){s_config.fnos_cpu_topic, 0, HA_VALUE_CPU, "FnOS CPU"};
+    s_topics[1] = (ha_topic_map_t){s_config.fnos_mem_topic, 0, HA_VALUE_MEM, "FnOS MEM"};
+    s_topics[2] = (ha_topic_map_t){s_config.fnos_gpu_topic, 0, HA_VALUE_GPU, "FnOS GPU"};
+    s_topics[3] = (ha_topic_map_t){s_config.fnos_tx_topic, 0, HA_VALUE_TX, "FnOS TX"};
+    s_topics[4] = (ha_topic_map_t){s_config.fnos_rx_topic, 0, HA_VALUE_RX, "FnOS RX"};
+    s_topics[5] = (ha_topic_map_t){s_config.win_cpu_topic, 1, HA_VALUE_CPU, "Windows11 CPU"};
+    s_topics[6] = (ha_topic_map_t){s_config.win_mem_topic, 1, HA_VALUE_MEM, "Windows11 MEM"};
+    s_topics[7] = (ha_topic_map_t){s_config.win_gpu_topic, 1, HA_VALUE_GPU, "Windows11 GPU"};
+    s_topics[8] = (ha_topic_map_t){s_config.win_tx_topic, 1, HA_VALUE_TX, "Windows11 TX"};
+    s_topics[9] = (ha_topic_map_t){s_config.win_rx_topic, 1, HA_VALUE_RX, "Windows11 RX"};
 
     const esp_mqtt_client_config_t mqtt_config = {
         .broker.address.uri = s_config.uri,

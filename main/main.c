@@ -160,7 +160,8 @@ static void dashboard_battery_update(int32_t percent, void * user_ctx)
 static void dashboard_power_button_press(void * user_ctx)
 {
     (void)user_ctx;
-    sys_dashboard_show_panel(0);
+    ESP_LOGI(TAG, "power button short press");
+    sys_dashboard_show_panel(2);
 }
 
 static void dashboard_photo_updated(void * user_ctx)
@@ -337,9 +338,9 @@ void app_main(void)
     const sys_dashboard_config_t dashboard = {
         .data_refresh_ms = 1000,
         .frame_refresh_hz = 30,
-        .brand_name = "Time",
-        .panel_names = {"Time", "FnOS", "Windows11", "Photo"},
-        .default_panel_index = 3,
+        .brand_name = "FnOS",
+        .panel_names = {"FnOS", "Windows11", "Photo"},
+        .default_panel_index = 2,
         .battery_percent = -1,
         .weather_text = "--",
         .time_text = "--:--",

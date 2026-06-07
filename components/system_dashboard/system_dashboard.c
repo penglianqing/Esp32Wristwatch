@@ -36,10 +36,11 @@
 #define PHOTO_STRIPES_PER_BATCH 2
 #define PHOTO_FRAME_DELAY_MS 5
 #define DASHBOARD_FRAME_DELAY_MS 33
-#define DASHBOARD_SWEEP_FRAME_DIVIDER 6
+#define DASHBOARD_SWEEP_FRAME_DIVIDER 1
+#define PHOTO_BATTERY_Y (-210)
 #define PHOTO_TIME_Y (120)
 #define PHOTO_DATE_Y (160)
-#define PHOTO_BATTERY_Y (-210)
+#define PHOTO_WEATHER_Y (200)
 
 static const char *TAG = "sys_dash";
 
@@ -70,6 +71,7 @@ static lv_obj_t * s_photo_placeholder_label;
 static lv_obj_t * s_photo_time_label;
 static lv_obj_t * s_photo_date_label;
 static lv_obj_t * s_photo_battery_label;
+static lv_obj_t * s_photo_weather_label;
 static lv_obj_t * s_bg_sweep[4];
 static lv_image_dsc_t s_photo_dsc[PHOTO_STRIPE_COUNT];
 static uint8_t * s_photo_buf;
@@ -97,6 +99,7 @@ static int64_t s_last_lvgl_lock_timeout_log_us;
 static char s_last_photo_time_text[16];
 static char s_last_photo_date_text[32];
 static char s_last_photo_battery_text[16];
+static char s_last_photo_weather_text[64];
 
 static void reset_dashboard_face_refs(void)
 {
@@ -126,6 +129,7 @@ static void reset_photo_page_refs(void)
     s_photo_time_label = NULL;
     s_photo_date_label = NULL;
     s_photo_battery_label = NULL;
+    s_photo_weather_label = NULL;
     for(int i = 0; i < PHOTO_STRIPE_COUNT; i++) {
         s_photo_stripes[i] = NULL;
         memset(&s_photo_dsc[i], 0, sizeof(s_photo_dsc[i]));
@@ -174,7 +178,7 @@ static const char * active_panel_name(void)
 
 static bool clock_panel_active(void)
 {
-    return s_active_panel == 0;
+    return false;
 }
 
 static bool photo_panel_active(void)
@@ -217,6 +221,8 @@ static void release_photo_buffer(void)
 static void create_photo_page(lv_obj_t * screen);
 static void create_dashboard_face(lv_obj_t * screen);
 static void dashboard_gesture_cb(lv_event_t * event);
+static lv_obj_t * create_screen_background(lv_obj_t * parent);
+static void enable_gesture_bubble(lv_obj_t * obj);
 static void update_metric_titles(void);
 static void refresh_panel_label(void);
 static int32_t metric_sample(int32_t index);
@@ -287,6 +293,34 @@ static bool parse_weather_temperature(const char * text, int32_t * out_celsius)
     return found;
 }
 
+static void format_weather_display_text(const char * raw_text, char * out_buf, size_t out_buf_size)
+{
+    if(out_buf == NULL || out_buf_size == 0) {
+        return;
+    }
+
+    out_buf[0] = '\0';
+    if(raw_text == NULL || raw_text[0] == '\0') {
+        snprintf(out_buf, out_buf_size, "%s", "--");
+        return;
+    }
+
+    const char * text = raw_text;
+    if(strncmp(text, "Beijing", 7) == 0) {
+        text += 7;
+        while(*text == ' ' || *text == ',' || *text == ':' || *text == '-' || *text == '/') {
+            text++;
+        }
+    }
+
+    if(*text == '\0') {
+        snprintf(out_buf, out_buf_size, "%s", "--");
+        return;
+    }
+
+    snprintf(out_buf, out_buf_size, "%s", text);
+}
+
 static const char * metric_title(int32_t index)
 {
     static const char * clock_titles[SYS_DASHBOARD_METRIC_COUNT] = {"HOUR", "MIN", "SEC"};
@@ -308,6 +342,7 @@ static void update_page_visibility(bool release_old_photo, bool build_page)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(screen, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
+    create_screen_background(screen);
 
     if(build_page) {
         if(photo_panel_active()) {
@@ -319,17 +354,6 @@ static void update_page_visibility(bool release_old_photo, bool build_page)
         else {
             create_dashboard_face(screen);
         }
-    }
-    else {
-        lv_obj_t * blank = lv_obj_create(screen);
-        lv_obj_set_size(blank, SCREEN_SIZE, SCREEN_SIZE);
-        lv_obj_center(blank);
-        lv_obj_set_style_radius(blank, 0, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(blank, lv_color_hex(0x080a0c), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(blank, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_width(blank, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(blank, 0, LV_PART_MAIN);
-        lv_obj_remove_flag(blank, LV_OBJ_FLAG_SCROLLABLE);
     }
 }
 
@@ -543,7 +567,7 @@ static void update_bottom_labels(int64_t now_us)
                                   sec / 3600, (sec / 60) % 60, sec % 60);
         }
         portENTER_CRITICAL(&s_value_lock);
-        snprintf(weather_buf, sizeof(weather_buf), "%s", s_weather_text);
+        format_weather_display_text(s_weather_text, weather_buf, sizeof(weather_buf));
         portEXIT_CRITICAL(&s_value_lock);
         lv_label_set_text(s_download_label, weather_buf);
         return;
@@ -560,6 +584,22 @@ static void refresh_panel_label(void)
     if(s_brand_label != NULL) {
         lv_label_set_text(s_brand_label, active_panel_name());
     }
+}
+
+static lv_obj_t * create_screen_background(lv_obj_t * parent)
+{
+    lv_obj_t * bg = lv_obj_create(parent);
+    enable_gesture_bubble(bg);
+    lv_obj_set_size(bg, lv_display_get_horizontal_resolution(NULL),
+                    lv_display_get_vertical_resolution(NULL));
+    lv_obj_align(bg, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_radius(bg, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bg, lv_color_hex(0x080a0c), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bg, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bg, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(bg, LV_OBJ_FLAG_SCROLLABLE);
+    return bg;
 }
 
 static bool set_label_text_if_changed(lv_obj_t * label, char * cache, size_t cache_size, const char * text)
@@ -593,13 +633,15 @@ static void update_battery_label(void)
 
 static void update_photo_labels(void)
 {
-    if(s_photo_time_label == NULL || s_photo_date_label == NULL || s_photo_battery_label == NULL) {
+    if(s_photo_time_label == NULL || s_photo_date_label == NULL ||
+       s_photo_battery_label == NULL || s_photo_weather_label == NULL) {
         return;
     }
 
     char time_buf[16];
     char date_buf[32];
     char battery_buf[16];
+    char weather_buf[64];
 
     struct tm timeinfo = {0};
     if(get_local_time(&timeinfo)) {
@@ -618,9 +660,14 @@ static void update_photo_labels(void)
         snprintf(battery_buf, sizeof(battery_buf), " %" LV_PRId32 "%%", s_battery_percent);
     }
 
+    portENTER_CRITICAL(&s_value_lock);
+    format_weather_display_text(s_weather_text, weather_buf, sizeof(weather_buf));
+    portEXIT_CRITICAL(&s_value_lock);
+
     set_label_text_if_changed(s_photo_time_label, s_last_photo_time_text, sizeof(s_last_photo_time_text), time_buf);
     set_label_text_if_changed(s_photo_date_label, s_last_photo_date_text, sizeof(s_last_photo_date_text), date_buf);
     set_label_text_if_changed(s_photo_battery_label, s_last_photo_battery_text, sizeof(s_last_photo_battery_text), battery_buf);
+    set_label_text_if_changed(s_photo_weather_label, s_last_photo_weather_text, sizeof(s_last_photo_weather_text), weather_buf);
 }
 
 static bool apply_staged_photo(void)
@@ -1049,12 +1096,14 @@ static void create_photo_page(lv_obj_t * screen)
                                              lv_color_hex(0x9da5af), LV_ALIGN_CENTER, 0, 0);
     lv_obj_move_background(s_photo_placeholder_label);
 
+    s_photo_battery_label = create_photo_overlay_label(s_photo_page, "--%", &lv_font_montserrat_14,
+                                                       LV_ALIGN_CENTER, 0, PHOTO_BATTERY_Y);
     s_photo_time_label = create_photo_overlay_label(s_photo_page, "--:--", &lv_font_montserrat_26,
                                                     LV_ALIGN_CENTER, 0, PHOTO_TIME_Y);
     s_photo_date_label = create_photo_overlay_label(s_photo_page, "---- -- --", &lv_font_montserrat_26,
                                                     LV_ALIGN_CENTER, 0, PHOTO_DATE_Y);
-    s_photo_battery_label = create_photo_overlay_label(s_photo_page, "--%", &lv_font_montserrat_14,
-                                                       LV_ALIGN_CENTER, 0, PHOTO_BATTERY_Y);
+    s_photo_weather_label = create_photo_overlay_label(s_photo_page, "--", &lv_font_montserrat_26,
+                                                       LV_ALIGN_CENTER, 0, PHOTO_WEATHER_Y);
     update_photo_labels();
 }
 
@@ -1146,10 +1195,9 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
     s_battery_percent = clamp_value(s_config.battery_percent, -1, 100);
     s_clock_cpu_history_value = s_config.metrics[0].value;
     s_active_panel = s_config.default_panel_index;
-    if(SYS_DASHBOARD_PANEL_COUNT > 0 && s_config.panel_names[0] == NULL) s_config.panel_names[0] = s_config.brand_name;
-    if(SYS_DASHBOARD_PANEL_COUNT > 1 && s_config.panel_names[1] == NULL) s_config.panel_names[1] = "FnOS";
-    if(SYS_DASHBOARD_PANEL_COUNT > 2 && s_config.panel_names[2] == NULL) s_config.panel_names[2] = "Windows11";
-    if(SYS_DASHBOARD_PANEL_COUNT > 3 && s_config.panel_names[3] == NULL) s_config.panel_names[3] = "Photo";
+    if(SYS_DASHBOARD_PANEL_COUNT > 0 && s_config.panel_names[0] == NULL) s_config.panel_names[0] = "FnOS";
+    if(SYS_DASHBOARD_PANEL_COUNT > 1 && s_config.panel_names[1] == NULL) s_config.panel_names[1] = "Windows11";
+    if(SYS_DASHBOARD_PANEL_COUNT > 2 && s_config.panel_names[2] == NULL) s_config.panel_names[2] = "Photo";
     if(s_config.time_text == NULL) s_config.time_text = "00:00";
     if(s_config.tx.name == NULL) s_config.tx.name = "TX";
     if(s_config.tx.unit == NULL) s_config.tx.unit = "Mbps";
@@ -1185,7 +1233,7 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
 
 void sys_dashboard_set_panel_metric_value(int32_t panel_index, int32_t metric_index, int32_t value)
 {
-    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
        metric_index < 0 || metric_index >= SYS_DASHBOARD_METRIC_COUNT) {
         return;
     }
@@ -1198,7 +1246,7 @@ void sys_dashboard_set_panel_metric_value(int32_t panel_index, int32_t metric_in
 
 void sys_dashboard_set_panel_tx_value(int32_t panel_index, int32_t value)
 {
-    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
         return;
     }
 
@@ -1210,7 +1258,7 @@ void sys_dashboard_set_panel_tx_value(int32_t panel_index, int32_t value)
 
 void sys_dashboard_set_panel_rx_value(int32_t panel_index, int32_t value)
 {
-    if(panel_index <= 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
         return;
     }
 
@@ -1315,15 +1363,15 @@ void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len)
 
 void sys_dashboard_set_metric_value(int32_t index, int32_t value)
 {
-    sys_dashboard_set_panel_metric_value(1, index, value);
+    sys_dashboard_set_panel_metric_value(0, index, value);
 }
 
 void sys_dashboard_set_tx_value(int32_t value)
 {
-    sys_dashboard_set_panel_tx_value(1, value);
+    sys_dashboard_set_panel_tx_value(0, value);
 }
 
 void sys_dashboard_set_rx_value(int32_t value)
 {
-    sys_dashboard_set_panel_rx_value(1, value);
+    sys_dashboard_set_panel_rx_value(0, value);
 }

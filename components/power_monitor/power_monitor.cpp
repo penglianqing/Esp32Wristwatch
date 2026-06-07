@@ -70,6 +70,7 @@ static void power_monitor_task(void * arg)
     while(true) {
         s_pmu.getIrqStatus();
         if(s_pmu.isPekeyShortPressIrq() && s_power_button_cb != nullptr) {
+            ESP_LOGI(TAG, "PKEY short press IRQ");
             s_power_button_cb(s_power_button_user_ctx);
         }
         s_pmu.clearIrqStatus();
