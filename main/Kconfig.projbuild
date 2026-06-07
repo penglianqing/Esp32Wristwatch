@@ -2,31 +2,31 @@ menu "System Dashboard"
 
     config DASHBOARD_WIFI_SSID
         string "WiFi SSID"
-        default "Xiaomi_185E"
+        default ""
         help
             WiFi network name used by the dashboard SNTP clock.
 
     config DASHBOARD_WIFI_PASSWORD
         string "WiFi password"
-        default "sy.315210"
+        default ""
         help
             WiFi password used by the dashboard SNTP clock.
 
     config DASHBOARD_HOSTNAME
         string "WiFi hostname"
-        default "fnos-dashboard"
+        default "dashboard-demo"
         help
             Hostname advertised by the dashboard network interface.
 
     config DASHBOARD_STATIC_IP
         string "Static IPv4 address"
-        default "192.168.1.222"
+        default ""
         help
             Static IPv4 address for the dashboard. Leave empty to use DHCP.
 
     config DASHBOARD_GATEWAY
         string "IPv4 gateway"
-        default "192.168.1.1"
+        default ""
         help
             Gateway used when static IPv4 is enabled.
 
@@ -38,7 +38,7 @@ menu "System Dashboard"
 
     config DASHBOARD_DNS
         string "IPv4 DNS server"
-        default "192.168.1.1"
+        default ""
         help
             DNS server used when static IPv4 is enabled.
 
@@ -56,21 +56,21 @@ menu "System Dashboard"
 
     config DASHBOARD_MQTT_URI
         string "MQTT broker URI"
-        default "mqtt://192.168.1.214:1883"
+        default ""
         help
             MQTT broker URI, for example mqtt://192.168.1.10:1883. Leave empty to keep mock data.
 
     config DASHBOARD_MQTT_USERNAME
         string "MQTT username"
-        default "esp32"
+        default ""
 
     config DASHBOARD_MQTT_PASSWORD
         string "MQTT password"
-        default "passwd"
+        default ""
 
     config DASHBOARD_MQTT_CLIENT_ID
         string "MQTT client id"
-        default "fnos-dashboard"
+        default "dashboard-demo"
 
     config DASHBOARD_MQTT_FNOS_CPU_TOPIC
         string "FnOS CPU MQTT topic"
@@ -118,7 +118,7 @@ menu "System Dashboard"
 
     config DASHBOARD_PHOTO_URL
         string "Photo RGB565 HTTP URL"
-        default "http://192.168.1.212:8000/image.rgb565"
+        default "http://example.local:8000/image.rgb565"
         help
             HTTP endpoint that returns one 466x466 RGB565 photo frame.
 

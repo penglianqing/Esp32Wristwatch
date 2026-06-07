@@ -87,7 +87,6 @@ static int32_t s_rx_external_value[SYS_DASHBOARD_PANEL_COUNT];
 static char s_weather_text[64];
 static bool s_weather_temperature_valid;
 static int32_t s_weather_temperature_c;
-static int32_t s_clock_cpu_history_value;
 static int32_t s_active_panel;
 static int32_t s_battery_percent = -1;
 static int32_t s_pending_panel_delta;
@@ -182,11 +181,6 @@ static const char * active_panel_name(void)
     return name ? name : s_config.brand_name;
 }
 
-static bool clock_panel_active(void)
-{
-    return false;
-}
-
 static bool photo_panel_active(void)
 {
     return s_active_panel == SYS_DASHBOARD_PANEL_COUNT - 1;
@@ -231,8 +225,6 @@ static lv_obj_t * create_screen_background(lv_obj_t * parent);
 static lv_obj_t * create_panel_screen(void);
 static void populate_panel_screen(lv_obj_t * screen);
 static void enable_gesture_bubble(lv_obj_t * obj);
-static void update_metric_titles(void);
-static void refresh_panel_label(void);
 static int32_t metric_sample(int32_t index);
 static void update_bottom_labels(int64_t now_us);
 static void set_metric_text(metric_t * metric, int32_t value);
@@ -256,22 +248,6 @@ static bool get_local_time(struct tm * timeinfo)
     }
 
     return localtime_r(&now, timeinfo) != NULL;
-}
-
-static int32_t clock_value(int32_t index)
-{
-    struct tm timeinfo = {0};
-    get_local_time(&timeinfo);
-
-    if(index == 0) return timeinfo.tm_hour;
-    if(index == 1) return timeinfo.tm_min;
-    return timeinfo.tm_sec;
-}
-
-static int32_t clock_arc_value(int32_t index, int32_t value)
-{
-    if(index == 0) return (value * 100) / 24;
-    return (value * 100) / 60;
 }
 
 static bool parse_weather_temperature(const char * text, int32_t * out_celsius)
@@ -335,8 +311,7 @@ static void format_weather_display_text(const char * raw_text, char * out_buf, s
 
 static const char * metric_title(int32_t index)
 {
-    static const char * clock_titles[SYS_DASHBOARD_METRIC_COUNT] = {"HOUR", "MIN", "SEC"};
-    return clock_panel_active() ? clock_titles[index] : s_config.metrics[index].name;
+    return s_config.metrics[index].name;
 }
 
 static lv_obj_t * create_panel_screen(void)
@@ -468,21 +443,14 @@ static const uint8_t * current_photo_pixels(void)
 
 static void set_metric_text(metric_t * metric, int32_t value)
 {
-    int32_t index = (int32_t)(metric - s_metrics);
     metric->value = value;
-    if(clock_panel_active()) {
-        metric->target = clock_arc_value(index, value);
-        lv_label_set_text_fmt(metric->value_label, "%02" LV_PRId32, value);
+    if(value < 0) {
+        metric->target = 0;
+        lv_label_set_text(metric->value_label, "-");
     }
     else {
-        if(value < 0) {
-            metric->target = 0;
-            lv_label_set_text(metric->value_label, "-");
-        }
-        else {
-            metric->target = value;
-            lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
-        }
+        metric->target = value;
+        lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
     }
 }
 
@@ -512,23 +480,8 @@ static int32_t next_value(const sys_dashboard_metric_config_t * cfg, int32_t cur
     return target;
 }
 
-static int32_t next_speed(const sys_dashboard_speed_config_t * speed)
-{
-    int32_t min = speed->mock_min;
-    int32_t max = speed->mock_max;
-    if(max <= min) {
-        return speed->value;
-    }
-
-    return min + (int32_t)lv_rand(0, (uint32_t)(max - min));
-}
-
 static int32_t metric_sample(int32_t index)
 {
-    if(clock_panel_active()) {
-        return clock_value(index);
-    }
-
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
 
@@ -541,10 +494,6 @@ static int32_t metric_sample(int32_t index)
 
 static int32_t tx_sample(void)
 {
-    if(clock_panel_active()) {
-        return 0;
-    }
-
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
     return tx_has_external_data(panel_index, &value) ? value : -1;
@@ -552,10 +501,6 @@ static int32_t tx_sample(void)
 
 static int32_t rx_sample(void)
 {
-    if(clock_panel_active()) {
-        return 0;
-    }
-
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
     return rx_has_external_data(panel_index, &value) ? value : -1;
@@ -608,37 +553,8 @@ static void update_time_label(int64_t now_us)
     }
 }
 
-static void update_metric_titles(void)
-{
-    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-        if(s_metrics[i].name_label != NULL) {
-            lv_label_set_text(s_metrics[i].name_label, metric_title(i));
-        }
-    }
-}
-
 static void update_bottom_labels(int64_t now_us)
 {
-    if(clock_panel_active()) {
-        char weather_buf[64];
-        struct tm timeinfo = {0};
-        if(get_local_time(&timeinfo)) {
-            char date_buf[32];
-            strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %a", &timeinfo);
-            lv_label_set_text(s_upload_label, date_buf);
-        }
-        else {
-            int64_t sec = now_us / 1000000;
-            lv_label_set_text_fmt(s_upload_label, "Uptime %02lld:%02lld:%02lld",
-                                  sec / 3600, (sec / 60) % 60, sec % 60);
-        }
-        portENTER_CRITICAL(&s_value_lock);
-        format_weather_display_text(s_weather_text, weather_buf, sizeof(weather_buf));
-        portEXIT_CRITICAL(&s_value_lock);
-        lv_label_set_text(s_download_label, weather_buf);
-        return;
-    }
-
     int32_t tx_value = tx_sample();
     int32_t rx_value = rx_sample();
     if(tx_value < 0) {
@@ -654,13 +570,6 @@ static void update_bottom_labels(int64_t now_us)
     else {
         lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
                               s_config.rx.name, rx_value, s_config.rx.unit);
-    }
-}
-
-static void refresh_panel_label(void)
-{
-    if(s_brand_label != NULL) {
-        lv_label_set_text(s_brand_label, active_panel_name());
     }
 }
 
@@ -988,15 +897,8 @@ static void dashboard_update_task(void * arg)
                     if(s_config.history_metric_index >= 0 &&
                        s_config.history_metric_index < SYS_DASHBOARD_METRIC_COUNT) {
                         metric_t * history_metric = &s_metrics[s_config.history_metric_index];
-                        if(clock_panel_active()) {
-                            s_clock_cpu_history_value = next_value(&s_config.metrics[0], s_clock_cpu_history_value);
-                            set_history_color(history_metric, s_config.metrics[0].color);
-                            push_history(history_metric, s_clock_cpu_history_value);
-                        }
-                        else {
-                            set_history_color(history_metric, history_metric->color);
-                            push_history(history_metric, history_metric->target);
-                        }
+                        set_history_color(history_metric, history_metric->color);
+                        push_history(history_metric, history_metric->target);
                     }
 
                     update_bottom_labels(now_us);
@@ -1322,7 +1224,6 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
         s_config.default_panel_index = 0;
     }
     s_battery_percent = clamp_value(s_config.battery_percent, -1, 100);
-    s_clock_cpu_history_value = s_config.metrics[0].value;
     s_active_panel = s_config.default_panel_index;
     if(SYS_DASHBOARD_PANEL_COUNT > 0 && s_config.panel_names[0] == NULL) s_config.panel_names[0] = "FnOS";
     if(SYS_DASHBOARD_PANEL_COUNT > 1 && s_config.panel_names[1] == NULL) s_config.panel_names[1] = "Windows11";
@@ -1454,15 +1355,6 @@ void sys_dashboard_show_panel(int32_t panel_index)
     s_pending_panel_index = panel_index;
     s_pending_panel_delta = 0;
     portEXIT_CRITICAL(&s_value_lock);
-}
-
-void sys_dashboard_set_photo_path(const char * path)
-{
-    LV_UNUSED(path);
-}
-
-void sys_dashboard_reload_photo(void)
-{
 }
 
 void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len)

@@ -2,4 +2,10 @@ build/
 managed_components/
 .vscode/
 .clangd
+
+# Generated ESP-IDF config
+sdkconfig
 sdkconfig.old
+
+# Local/private overrides
+sdkconfig.defaults.local

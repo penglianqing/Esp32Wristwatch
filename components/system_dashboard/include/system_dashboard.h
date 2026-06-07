@@ -42,7 +42,6 @@ typedef struct {
     const char * panel_names[SYS_DASHBOARD_PANEL_COUNT];
     int32_t default_panel_index;
     int32_t battery_percent;
-    const char * photo_path;
     const char * weather_text;
     const char * time_text;
     sys_dashboard_time_cb_t time_cb;
@@ -64,8 +63,6 @@ void sys_dashboard_set_weather_temperature(int32_t celsius);
 void sys_dashboard_set_battery_percent(int32_t percent);
 void sys_dashboard_next_panel(void);
 void sys_dashboard_show_panel(int32_t panel_index);
-void sys_dashboard_set_photo_path(const char * path);
-void sys_dashboard_reload_photo(void);
 void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len);
 void sys_dashboard_set_fallback_photo(const uint8_t * data, size_t len);
 void sys_dashboard_set_metric_value(int32_t index, int32_t value);
