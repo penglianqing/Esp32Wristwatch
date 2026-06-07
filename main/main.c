@@ -127,7 +127,6 @@ static const char * TAG = "main";
 #define BOOT_BUTTON_POLL_MS 20
 #define BOOT_BUTTON_DEBOUNCE_MS 60
 #define BOOT_BUTTON_TASK_STACK 4096
-#define MQTT_START_DELAY_MS 20000
 #define PHOTO_IMAGE_SIZE 466
 #define PHOTO_IMAGE_BYTES ((PHOTO_IMAGE_SIZE) * (PHOTO_IMAGE_SIZE) * 2)
 #define PHOTO_REFRESH_CLICK_COOLDOWN_MS 1500
@@ -256,15 +255,6 @@ static esp_err_t __attribute__((unused)) start_mqtt_client(void)
 
     ESP_LOGW(TAG, "mqtt init not ready: %s", esp_err_to_name(ret));
     return ret;
-}
-
-static void __attribute__((unused)) delayed_mqtt_task(void * arg)
-{
-    (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(MQTT_START_DELAY_MS));
-    ESP_LOGI(TAG, "starting delayed mqtt");
-    start_mqtt_client();
-    vTaskDelete(NULL);
 }
 
 static void boot_button_task(void * arg)
@@ -405,9 +395,9 @@ void app_main(void)
 
     sys_dashboard_start(&dashboard);
 
-    BaseType_t mqtt_task_ok = xTaskCreate(delayed_mqtt_task, "mqtt_delayed", 4096, NULL, 4, NULL);
-    if(mqtt_task_ok != pdPASS) {
-        ESP_LOGW(TAG, "failed to create delayed mqtt task");
+    esp_err_t mqtt_ret = start_mqtt_client();
+    if(mqtt_ret != ESP_OK) {
+        ESP_LOGW(TAG, "mqtt init not ready: %s", esp_err_to_name(mqtt_ret));
     }
 
     esp_err_t button_ret = boot_button_start();

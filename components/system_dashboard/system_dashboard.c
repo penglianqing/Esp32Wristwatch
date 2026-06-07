@@ -37,6 +37,8 @@
 #define PHOTO_FRAME_DELAY_MS 5
 #define DASHBOARD_FRAME_DELAY_MS 33
 #define DASHBOARD_SWEEP_FRAME_DIVIDER 1
+#define PANEL_TRANSITION_HOLD_FRAMES 2
+#define PANEL_TRANSITION_BLACK_DELAY_MS 20
 #define PHOTO_BATTERY_Y (-210)
 #define PHOTO_TIME_Y (120)
 #define PHOTO_DATE_Y (160)
@@ -96,6 +98,7 @@ static int32_t s_photo_apply_index;
 static bool s_panel_build_pending;
 static bool s_panel_black_frame_pending;
 static lv_obj_t * s_panel_staging_screen;
+static uint8_t s_panel_transition_hold_frames;
 static int64_t s_last_lvgl_lock_timeout_log_us;
 static const uint8_t * s_photo_fallback_data;
 static size_t s_photo_fallback_len;
@@ -225,7 +228,8 @@ static void create_photo_page(lv_obj_t * screen);
 static void create_dashboard_face(lv_obj_t * screen);
 static void dashboard_gesture_cb(lv_event_t * event);
 static lv_obj_t * create_screen_background(lv_obj_t * parent);
-static lv_obj_t * create_panel_screen(bool build_page);
+static lv_obj_t * create_panel_screen(void);
+static void populate_panel_screen(lv_obj_t * screen);
 static void enable_gesture_bubble(lv_obj_t * obj);
 static void update_metric_titles(void);
 static void refresh_panel_label(void);
@@ -335,7 +339,7 @@ static const char * metric_title(int32_t index)
     return clock_panel_active() ? clock_titles[index] : s_config.metrics[index].name;
 }
 
-static lv_obj_t * create_panel_screen(bool build_page)
+static lv_obj_t * create_panel_screen(void)
 {
     lv_obj_t * screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
@@ -344,16 +348,21 @@ static lv_obj_t * create_panel_screen(bool build_page)
     lv_obj_add_event_cb(screen, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
     create_screen_background(screen);
 
-    if(build_page) {
-        if(photo_panel_active()) {
-            create_photo_page(screen);
-        }
-        else {
-            create_dashboard_face(screen);
-        }
+    return screen;
+}
+
+static void populate_panel_screen(lv_obj_t * screen)
+{
+    if(screen == NULL) {
+        return;
     }
 
-    return screen;
+    if(photo_panel_active()) {
+        create_photo_page(screen);
+    }
+    else {
+        create_dashboard_face(screen);
+    }
 }
 
 static void begin_panel_transition(void)
@@ -368,19 +377,22 @@ static void finish_pending_panel_build(void)
         return;
     }
 
-    if(s_panel_black_frame_pending) {
-        s_panel_black_frame_pending = false;
+    if(s_panel_transition_hold_frames > 0) {
+        s_panel_transition_hold_frames--;
         return;
     }
 
-    lv_obj_t * old_screen = lv_screen_active();
-    lv_obj_t * built_screen = create_panel_screen(true);
-    lv_screen_load(built_screen);
-    if(old_screen != NULL && old_screen != built_screen) {
-        lv_obj_delete(old_screen);
+    if(s_panel_black_frame_pending) {
+        s_panel_black_frame_pending = false;
+        s_panel_transition_hold_frames = PANEL_TRANSITION_HOLD_FRAMES;
+        return;
     }
-    s_panel_staging_screen = NULL;
+
+    lv_obj_t * active_screen = lv_screen_active();
+    populate_panel_screen(active_screen);
+    s_panel_staging_screen = active_screen;
     s_panel_build_pending = false;
+    s_panel_transition_hold_frames = PANEL_TRANSITION_HOLD_FRAMES;
 }
 
 static bool metric_has_external_data(int32_t panel_index, int32_t metric_index, int32_t * out_value)
@@ -809,6 +821,10 @@ static bool consume_pending_photo_memory(void)
 
 static void switch_panel(int32_t delta)
 {
+    if(s_panel_build_pending) {
+        return;
+    }
+
     int32_t next = (s_active_panel + delta) % SYS_DASHBOARD_PANEL_COUNT;
     if(next < 0) {
         next += SYS_DASHBOARD_PANEL_COUNT;
@@ -824,15 +840,21 @@ static void switch_panel(int32_t delta)
     s_active_panel = next;
     s_panel_build_pending = true;
     s_panel_black_frame_pending = true;
+    s_panel_transition_hold_frames = PANEL_TRANSITION_HOLD_FRAMES;
     reset_dashboard_face_refs();
     reset_photo_page_refs();
     if(leaving_photo) {
         release_photo_buffer();
     }
-    s_panel_staging_screen = create_panel_screen(false);
+    s_panel_staging_screen = create_panel_screen();
     lv_screen_load(s_panel_staging_screen);
     if(old_screen != NULL && old_screen != s_panel_staging_screen) {
         lv_obj_delete(old_screen);
+    }
+    bsp_display_unlock();
+    vTaskDelay(pdMS_TO_TICKS(PANEL_TRANSITION_BLACK_DELAY_MS));
+    if(!bsp_display_lock(500)) {
+        return;
     }
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
@@ -840,6 +862,10 @@ static void switch_panel(int32_t delta)
 
 static void show_panel(int32_t panel_index)
 {
+    if(s_panel_build_pending) {
+        return;
+    }
+
     if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
        panel_index == s_active_panel) {
         return;
@@ -851,15 +877,21 @@ static void show_panel(int32_t panel_index)
     s_active_panel = panel_index;
     s_panel_build_pending = true;
     s_panel_black_frame_pending = true;
+    s_panel_transition_hold_frames = PANEL_TRANSITION_HOLD_FRAMES;
     reset_dashboard_face_refs();
     reset_photo_page_refs();
     if(leaving_photo) {
         release_photo_buffer();
     }
-    s_panel_staging_screen = create_panel_screen(false);
+    s_panel_staging_screen = create_panel_screen();
     lv_screen_load(s_panel_staging_screen);
     if(old_screen != NULL && old_screen != s_panel_staging_screen) {
         lv_obj_delete(old_screen);
+    }
+    bsp_display_unlock();
+    vTaskDelay(pdMS_TO_TICKS(PANEL_TRANSITION_BLACK_DELAY_MS));
+    if(!bsp_display_lock(500)) {
+        return;
     }
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
@@ -867,6 +899,10 @@ static void show_panel(int32_t panel_index)
 
 static void apply_pending_panel_request(void)
 {
+    if(s_panel_build_pending) {
+        return;
+    }
+
     int32_t panel_index = -1;
     int32_t panel_delta = 0;
 
@@ -1261,8 +1297,9 @@ static void create_dashboard_face(lv_obj_t * screen)
 static void create_dashboard(void)
 {
     configure_gesture_input();
-    lv_obj_t * screen = create_panel_screen(true);
+    lv_obj_t * screen = create_panel_screen();
     lv_screen_load(screen);
+    populate_panel_screen(screen);
 }
 
 void sys_dashboard_start(const sys_dashboard_config_t * config)
