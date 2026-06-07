@@ -135,6 +135,9 @@ static const char * TAG = "main";
 static bool s_photo_fetcher_started;
 static int64_t s_last_photo_click_request_us;
 
+extern const uint8_t photo_fallback_rgb565_start[] asm("_binary_photo_fallback_rgb565_start");
+extern const uint8_t photo_fallback_rgb565_end[] asm("_binary_photo_fallback_rgb565_end");
+
 static void dashboard_time_text(char * buf, size_t buf_size, void * user_ctx)
 {
     (void)user_ctx;
@@ -334,6 +337,8 @@ void app_main(void)
     }
 
     bsp_display_start();
+    sys_dashboard_set_fallback_photo(photo_fallback_rgb565_start,
+                                     (size_t)(photo_fallback_rgb565_end - photo_fallback_rgb565_start));
 
     const sys_dashboard_config_t dashboard = {
         .data_refresh_ms = 1000,

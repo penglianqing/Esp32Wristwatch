@@ -95,7 +95,10 @@ static bool s_photo_apply_pending;
 static int32_t s_photo_apply_index;
 static bool s_panel_build_pending;
 static bool s_panel_black_frame_pending;
+static lv_obj_t * s_panel_staging_screen;
 static int64_t s_last_lvgl_lock_timeout_log_us;
+static const uint8_t * s_photo_fallback_data;
+static size_t s_photo_fallback_len;
 static char s_last_photo_time_text[16];
 static char s_last_photo_date_text[32];
 static char s_last_photo_battery_text[16];
@@ -222,6 +225,7 @@ static void create_photo_page(lv_obj_t * screen);
 static void create_dashboard_face(lv_obj_t * screen);
 static void dashboard_gesture_cb(lv_event_t * event);
 static lv_obj_t * create_screen_background(lv_obj_t * parent);
+static lv_obj_t * create_panel_screen(bool build_page);
 static void enable_gesture_bubble(lv_obj_t * obj);
 static void update_metric_titles(void);
 static void refresh_panel_label(void);
@@ -229,6 +233,10 @@ static int32_t metric_sample(int32_t index);
 static void update_bottom_labels(int64_t now_us);
 static void set_metric_text(metric_t * metric, int32_t value);
 static bool set_label_text_if_changed(lv_obj_t * label, char * cache, size_t cache_size, const char * text);
+static bool metric_has_external_data(int32_t panel_index, int32_t metric_index, int32_t * out_value);
+static bool tx_has_external_data(int32_t panel_index, int32_t * out_value);
+static bool rx_has_external_data(int32_t panel_index, int32_t * out_value);
+static const uint8_t * current_photo_pixels(void);
 
 static bool get_local_time(struct tm * timeinfo)
 {
@@ -327,17 +335,9 @@ static const char * metric_title(int32_t index)
     return clock_panel_active() ? clock_titles[index] : s_config.metrics[index].name;
 }
 
-static void update_page_visibility(bool release_old_photo, bool build_page)
+static lv_obj_t * create_panel_screen(bool build_page)
 {
-    lv_obj_t * screen = lv_screen_active();
-    lv_obj_clean(screen);
-    reset_dashboard_face_refs();
-    reset_photo_page_refs();
-
-    if(release_old_photo) {
-        release_photo_buffer();
-    }
-
+    lv_obj_t * screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -347,19 +347,19 @@ static void update_page_visibility(bool release_old_photo, bool build_page)
     if(build_page) {
         if(photo_panel_active()) {
             create_photo_page(screen);
-            if(s_config.photo_click_cb != NULL) {
-                s_config.photo_click_cb(s_config.photo_click_user_ctx);
-            }
         }
         else {
             create_dashboard_face(screen);
         }
     }
+
+    return screen;
 }
 
 static void begin_panel_transition(void)
 {
-    /* Keep transitions cheap on this panel; page cleanup happens in update_page_visibility(). */
+    /* Screens are rebuilt on dedicated LVGL screens; transition work is handled
+     * by the staged blank-screen/load path in switch_panel()/show_panel(). */
 }
 
 static void finish_pending_panel_build(void)
@@ -373,17 +373,85 @@ static void finish_pending_panel_build(void)
         return;
     }
 
-    update_page_visibility(false, true);
-    s_panel_build_pending = false;
-
-    if(!photo_panel_active()) {
-        refresh_panel_label();
-        update_metric_titles();
-        for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-            set_metric_text(&s_metrics[i], metric_sample(i));
-        }
-        update_bottom_labels(esp_timer_get_time());
+    lv_obj_t * old_screen = lv_screen_active();
+    lv_obj_t * built_screen = create_panel_screen(true);
+    lv_screen_load(built_screen);
+    if(old_screen != NULL && old_screen != built_screen) {
+        lv_obj_delete(old_screen);
     }
+    s_panel_staging_screen = NULL;
+    s_panel_build_pending = false;
+}
+
+static bool metric_has_external_data(int32_t panel_index, int32_t metric_index, int32_t * out_value)
+{
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT ||
+       metric_index < 0 || metric_index >= SYS_DASHBOARD_METRIC_COUNT) {
+        return false;
+    }
+
+    bool has_external = false;
+    int32_t value = 0;
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_metric_external_valid[panel_index][metric_index];
+    value = s_metric_external_value[panel_index][metric_index];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(has_external && out_value != NULL) {
+        *out_value = value;
+    }
+    return has_external;
+}
+
+static bool tx_has_external_data(int32_t panel_index, int32_t * out_value)
+{
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        return false;
+    }
+
+    bool has_external = false;
+    int32_t value = 0;
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_tx_external_valid[panel_index];
+    value = s_tx_external_value[panel_index];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(has_external && out_value != NULL) {
+        *out_value = value;
+    }
+    return has_external;
+}
+
+static bool rx_has_external_data(int32_t panel_index, int32_t * out_value)
+{
+    if(panel_index < 0 || panel_index >= SYS_DASHBOARD_PANEL_COUNT) {
+        return false;
+    }
+
+    bool has_external = false;
+    int32_t value = 0;
+    portENTER_CRITICAL(&s_value_lock);
+    has_external = s_rx_external_valid[panel_index];
+    value = s_rx_external_value[panel_index];
+    portEXIT_CRITICAL(&s_value_lock);
+
+    if(has_external && out_value != NULL) {
+        *out_value = value;
+    }
+    return has_external;
+}
+
+static const uint8_t * current_photo_pixels(void)
+{
+    if(s_photo_buf != NULL) {
+        return s_photo_buf;
+    }
+
+    if(s_photo_fallback_data != NULL && s_photo_fallback_len == PHOTO_IMAGE_BYTES) {
+        return s_photo_fallback_data;
+    }
+
+    return NULL;
 }
 
 static void set_metric_text(metric_t * metric, int32_t value)
@@ -395,8 +463,14 @@ static void set_metric_text(metric_t * metric, int32_t value)
         lv_label_set_text_fmt(metric->value_label, "%02" LV_PRId32, value);
     }
     else {
-        metric->target = value;
-        lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
+        if(value < 0) {
+            metric->target = 0;
+            lv_label_set_text(metric->value_label, "-");
+        }
+        else {
+            metric->target = value;
+            lv_label_set_text_fmt(metric->value_label, "%" LV_PRId32 "%s", value, metric->unit);
+        }
     }
 }
 
@@ -445,18 +519,12 @@ static int32_t metric_sample(int32_t index)
 
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
-    bool has_external = false;
 
-    portENTER_CRITICAL(&s_value_lock);
-    has_external = panel_index > 0 && s_metric_external_valid[panel_index][index];
-    value = s_metric_external_value[panel_index][index];
-    portEXIT_CRITICAL(&s_value_lock);
-
-    if(has_external) {
+    if(metric_has_external_data(panel_index, index, &value)) {
         return clamp_value(value, 0, 100);
     }
 
-    return next_value(&s_config.metrics[index], s_metrics[index].value);
+    return -1;
 }
 
 static int32_t tx_sample(void)
@@ -467,14 +535,7 @@ static int32_t tx_sample(void)
 
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
-    bool has_external = false;
-
-    portENTER_CRITICAL(&s_value_lock);
-    has_external = panel_index > 0 && s_tx_external_valid[panel_index];
-    value = s_tx_external_value[panel_index];
-    portEXIT_CRITICAL(&s_value_lock);
-
-    return has_external ? value : next_speed(&s_config.tx);
+    return tx_has_external_data(panel_index, &value) ? value : -1;
 }
 
 static int32_t rx_sample(void)
@@ -485,14 +546,7 @@ static int32_t rx_sample(void)
 
     int32_t panel_index = active_panel_index();
     int32_t value = 0;
-    bool has_external = false;
-
-    portENTER_CRITICAL(&s_value_lock);
-    has_external = panel_index > 0 && s_rx_external_valid[panel_index];
-    value = s_rx_external_value[panel_index];
-    portEXIT_CRITICAL(&s_value_lock);
-
-    return has_external ? value : next_speed(&s_config.rx);
+    return rx_has_external_data(panel_index, &value) ? value : -1;
 }
 
 static void push_history_bars(lv_obj_t ** bars, int32_t value)
@@ -573,10 +627,22 @@ static void update_bottom_labels(int64_t now_us)
         return;
     }
 
-    lv_label_set_text_fmt(s_upload_label, "%s : %" LV_PRId32 "%s",
-                          s_config.tx.name, tx_sample(), s_config.tx.unit);
-    lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
-                          s_config.rx.name, rx_sample(), s_config.rx.unit);
+    int32_t tx_value = tx_sample();
+    int32_t rx_value = rx_sample();
+    if(tx_value < 0) {
+        lv_label_set_text_fmt(s_upload_label, "%s : -", s_config.tx.name);
+    }
+    else {
+        lv_label_set_text_fmt(s_upload_label, "%s : %" LV_PRId32 "%s",
+                              s_config.tx.name, tx_value, s_config.tx.unit);
+    }
+    if(rx_value < 0) {
+        lv_label_set_text_fmt(s_download_label, "%s : -", s_config.rx.name);
+    }
+    else {
+        lv_label_set_text_fmt(s_download_label, "%s : %" LV_PRId32 "%s",
+                              s_config.rx.name, rx_value, s_config.rx.unit);
+    }
 }
 
 static void refresh_panel_label(void)
@@ -672,7 +738,8 @@ static void update_photo_labels(void)
 
 static bool apply_staged_photo(void)
 {
-    if(s_photo_stripes[0] == NULL || s_photo_buf == NULL) {
+    const uint8_t * photo_pixels = current_photo_pixels();
+    if(s_photo_stripes[0] == NULL || photo_pixels == NULL) {
         if(s_photo_placeholder_label != NULL) {
             lv_obj_remove_flag(s_photo_placeholder_label, LV_OBJ_FLAG_HIDDEN);
         }
@@ -693,7 +760,7 @@ static bool apply_staged_photo(void)
         s_photo_dsc[i].header.h = stripe_h;
         s_photo_dsc[i].header.stride = SCREEN_SIZE * 2;
         s_photo_dsc[i].data_size = SCREEN_SIZE * stripe_h * 2;
-        s_photo_dsc[i].data = s_photo_buf + (stripe_y * SCREEN_SIZE * 2);
+        s_photo_dsc[i].data = photo_pixels + (stripe_y * SCREEN_SIZE * 2);
     }
 
     s_photo_apply_index = 0;
@@ -753,10 +820,20 @@ static void switch_panel(int32_t delta)
 
     bool leaving_photo = photo_panel_active();
     begin_panel_transition();
+    lv_obj_t * old_screen = lv_screen_active();
     s_active_panel = next;
     s_panel_build_pending = true;
     s_panel_black_frame_pending = true;
-    update_page_visibility(leaving_photo, false);
+    reset_dashboard_face_refs();
+    reset_photo_page_refs();
+    if(leaving_photo) {
+        release_photo_buffer();
+    }
+    s_panel_staging_screen = create_panel_screen(false);
+    lv_screen_load(s_panel_staging_screen);
+    if(old_screen != NULL && old_screen != s_panel_staging_screen) {
+        lv_obj_delete(old_screen);
+    }
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
 }
@@ -770,10 +847,20 @@ static void show_panel(int32_t panel_index)
 
     bool leaving_photo = photo_panel_active();
     begin_panel_transition();
+    lv_obj_t * old_screen = lv_screen_active();
     s_active_panel = panel_index;
     s_panel_build_pending = true;
     s_panel_black_frame_pending = true;
-    update_page_visibility(leaving_photo, false);
+    reset_dashboard_face_refs();
+    reset_photo_page_refs();
+    if(leaving_photo) {
+        release_photo_buffer();
+    }
+    s_panel_staging_screen = create_panel_screen(false);
+    lv_screen_load(s_panel_staging_screen);
+    if(old_screen != NULL && old_screen != s_panel_staging_screen) {
+        lv_obj_delete(old_screen);
+    }
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
 }
@@ -1104,6 +1191,10 @@ static void create_photo_page(lv_obj_t * screen)
                                                     LV_ALIGN_CENTER, 0, PHOTO_DATE_Y);
     s_photo_weather_label = create_photo_overlay_label(s_photo_page, "--", &lv_font_montserrat_26,
                                                        LV_ALIGN_CENTER, 0, PHOTO_WEATHER_Y);
+
+    if(s_photo_buf == NULL && s_photo_fallback_data != NULL && s_photo_fallback_len == PHOTO_IMAGE_BYTES) {
+        apply_staged_photo();
+    }
     update_photo_labels();
 }
 
@@ -1170,7 +1261,8 @@ static void create_dashboard_face(lv_obj_t * screen)
 static void create_dashboard(void)
 {
     configure_gesture_input();
-    update_page_visibility(false, true);
+    lv_obj_t * screen = create_panel_screen(true);
+    lv_screen_load(screen);
 }
 
 void sys_dashboard_start(const sys_dashboard_config_t * config)
@@ -1359,6 +1451,16 @@ void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len)
     portENTER_CRITICAL(&s_value_lock);
     s_photo_memory_pending = true;
     portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_fallback_photo(const uint8_t * data, size_t len)
+{
+    if(data == NULL || len != PHOTO_IMAGE_BYTES) {
+        return;
+    }
+
+    s_photo_fallback_data = data;
+    s_photo_fallback_len = len;
 }
 
 void sys_dashboard_set_metric_value(int32_t index, int32_t value)
