@@ -10,9 +10,10 @@ extern "C" {
 #endif
 
 #define SYS_DASHBOARD_METRIC_COUNT 3
-#define SYS_DASHBOARD_PANEL_COUNT 3
+#define SYS_DASHBOARD_PANEL_COUNT 4
 
 typedef void (*sys_dashboard_time_cb_t)(char * buf, size_t buf_size, void * user_ctx);
+typedef void (*sys_dashboard_photo_click_cb_t)(void * user_ctx);
 
 typedef struct {
     const char * name;
@@ -41,10 +42,13 @@ typedef struct {
     const char * panel_names[SYS_DASHBOARD_PANEL_COUNT];
     int32_t default_panel_index;
     int32_t battery_percent;
+    const char * photo_path;
     const char * weather_text;
     const char * time_text;
     sys_dashboard_time_cb_t time_cb;
     void * time_user_ctx;
+    sys_dashboard_photo_click_cb_t photo_click_cb;
+    void * photo_click_user_ctx;
     int32_t history_metric_index;
     sys_dashboard_metric_config_t metrics[SYS_DASHBOARD_METRIC_COUNT];
     sys_dashboard_speed_config_t tx;
@@ -60,6 +64,9 @@ void sys_dashboard_set_weather_temperature(int32_t celsius);
 void sys_dashboard_set_battery_percent(int32_t percent);
 void sys_dashboard_next_panel(void);
 void sys_dashboard_show_panel(int32_t panel_index);
+void sys_dashboard_set_photo_path(const char * path);
+void sys_dashboard_reload_photo(void);
+void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len);
 void sys_dashboard_set_metric_value(int32_t index, int32_t value);
 void sys_dashboard_set_tx_value(int32_t value);
 void sys_dashboard_set_rx_value(int32_t value);

@@ -116,4 +116,16 @@ menu "System Dashboard"
         string "DIAL weather MQTT topic"
         default "esp32/dial/weather/state"
 
+    config DASHBOARD_PHOTO_URL
+        string "Photo RGB565 HTTP URL"
+        default "http://192.168.1.212:8000/image.rgb565"
+        help
+            HTTP endpoint that returns one 466x466 RGB565 photo frame.
+
+    config DASHBOARD_PHOTO_REFRESH_MS
+        int "Photo refresh interval in ms"
+        default 300000
+        help
+            Interval for downloading a new photo. 300000 ms is 5 minutes.
+
 endmenu

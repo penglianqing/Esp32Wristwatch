@@ -13,6 +13,7 @@
 #include "lvgl.h"
 #include "bsp/esp-bsp.h"
 #include "ha_mqtt.h"
+#include "image_fetcher.h"
 #include "power_monitor.h"
 #include "system_dashboard.h"
 #include "wifi_time.h"
@@ -113,11 +114,26 @@
 #define CONFIG_DASHBOARD_MQTT_WEATHER_TOPIC "esp32/dial/weather/state"
 #endif
 
+#ifndef CONFIG_DASHBOARD_PHOTO_URL
+#define CONFIG_DASHBOARD_PHOTO_URL "http://192.168.1.212:8000/image.rgb565"
+#endif
+
+#ifndef CONFIG_DASHBOARD_PHOTO_REFRESH_MS
+#define CONFIG_DASHBOARD_PHOTO_REFRESH_MS 300000
+#endif
+
 static const char * TAG = "main";
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 #define BOOT_BUTTON_POLL_MS 20
 #define BOOT_BUTTON_DEBOUNCE_MS 60
 #define BOOT_BUTTON_TASK_STACK 4096
+#define MQTT_START_DELAY_MS 20000
+#define PHOTO_IMAGE_SIZE 466
+#define PHOTO_IMAGE_BYTES ((PHOTO_IMAGE_SIZE) * (PHOTO_IMAGE_SIZE) * 2)
+#define PHOTO_REFRESH_CLICK_COOLDOWN_MS 1500
+
+static bool s_photo_fetcher_started;
+static int64_t s_last_photo_click_request_us;
 
 static void dashboard_time_text(char * buf, size_t buf_size, void * user_ctx)
 {
@@ -145,6 +161,106 @@ static void dashboard_power_button_press(void * user_ctx)
 {
     (void)user_ctx;
     sys_dashboard_show_panel(0);
+}
+
+static void dashboard_photo_updated(void * user_ctx)
+{
+    (void)user_ctx;
+}
+
+static void dashboard_photo_data(const uint8_t * data, size_t len, void * user_ctx)
+{
+    (void)user_ctx;
+    sys_dashboard_set_photo_buffer(data, len);
+}
+
+static esp_err_t start_photo_fetcher(void)
+{
+    if(s_photo_fetcher_started) {
+        return ESP_OK;
+    }
+
+    const image_fetcher_config_t image_fetcher = {
+        .url = CONFIG_DASHBOARD_PHOTO_URL,
+        .expected_size = PHOTO_IMAGE_BYTES,
+        .refresh_ms = CONFIG_DASHBOARD_PHOTO_REFRESH_MS,
+        .update_cb = dashboard_photo_updated,
+        .data_cb = dashboard_photo_data,
+    };
+    esp_err_t ret = image_fetcher_start(&image_fetcher);
+    if(ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+        s_photo_fetcher_started = true;
+        ESP_LOGI(TAG, "photo fetcher ready: %s", CONFIG_DASHBOARD_PHOTO_URL);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "photo fetcher start failed: %s", esp_err_to_name(ret));
+    return ret;
+}
+
+static void dashboard_photo_click(void * user_ctx)
+{
+    (void)user_ctx;
+    int64_t now_us = esp_timer_get_time();
+    if((now_us - s_last_photo_click_request_us) < (PHOTO_REFRESH_CLICK_COOLDOWN_MS * 1000LL)) {
+        ESP_LOGI(TAG, "photo refresh skipped: cooldown");
+        return;
+    }
+    s_last_photo_click_request_us = now_us;
+    ESP_LOGI(TAG, "photo page refresh requested");
+    esp_err_t start_ret = start_photo_fetcher();
+    if(start_ret != ESP_OK) {
+        ESP_LOGW(TAG, "photo update skipped: %s", esp_err_to_name(start_ret));
+        return;
+    }
+
+    esp_err_t ret = image_fetcher_request_update();
+    if(ret != ESP_OK) {
+        ESP_LOGW(TAG, "photo update request failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static esp_err_t __attribute__((unused)) start_mqtt_client(void)
+{
+    const ha_mqtt_config_t ha_mqtt = {
+        .uri = CONFIG_DASHBOARD_MQTT_URI,
+        .username = CONFIG_DASHBOARD_MQTT_USERNAME,
+        .password = CONFIG_DASHBOARD_MQTT_PASSWORD,
+        .client_id = CONFIG_DASHBOARD_MQTT_CLIENT_ID,
+        .fnos_cpu_topic = CONFIG_DASHBOARD_MQTT_FNOS_CPU_TOPIC,
+        .fnos_mem_topic = CONFIG_DASHBOARD_MQTT_FNOS_MEM_TOPIC,
+        .fnos_gpu_topic = CONFIG_DASHBOARD_MQTT_FNOS_GPU_TOPIC,
+        .fnos_tx_topic = CONFIG_DASHBOARD_MQTT_FNOS_TX_TOPIC,
+        .fnos_rx_topic = CONFIG_DASHBOARD_MQTT_FNOS_RX_TOPIC,
+        .win_cpu_topic = CONFIG_DASHBOARD_MQTT_WIN_CPU_TOPIC,
+        .win_mem_topic = CONFIG_DASHBOARD_MQTT_WIN_MEM_TOPIC,
+        .win_gpu_topic = CONFIG_DASHBOARD_MQTT_WIN_GPU_TOPIC,
+        .win_tx_topic = CONFIG_DASHBOARD_MQTT_WIN_TX_TOPIC,
+        .win_rx_topic = CONFIG_DASHBOARD_MQTT_WIN_RX_TOPIC,
+        .weather_topic = CONFIG_DASHBOARD_MQTT_WEATHER_TOPIC,
+    };
+
+    esp_err_t ret = ha_mqtt_start(&ha_mqtt);
+    if(ret == ESP_OK) {
+        ESP_LOGI(TAG, "mqtt ready");
+        return ESP_OK;
+    }
+    if(ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "mqtt already running");
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "mqtt init not ready: %s", esp_err_to_name(ret));
+    return ret;
+}
+
+static void __attribute__((unused)) delayed_mqtt_task(void * arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(MQTT_START_DELAY_MS));
+    ESP_LOGI(TAG, "starting delayed mqtt");
+    start_mqtt_client();
+    vTaskDelete(NULL);
 }
 
 static void boot_button_task(void * arg)
@@ -220,14 +336,15 @@ void app_main(void)
 
     const sys_dashboard_config_t dashboard = {
         .data_refresh_ms = 1000,
-        .frame_refresh_hz = 60,
+        .frame_refresh_hz = 30,
         .brand_name = "Time",
-        .panel_names = {"Time", "FnOS", "Windows11"},
-        .default_panel_index = 0,
+        .panel_names = {"Time", "FnOS", "Windows11", "Photo"},
+        .default_panel_index = 3,
         .battery_percent = -1,
         .weather_text = "--",
         .time_text = "--:--",
         .time_cb = dashboard_time_text,
+        .photo_click_cb = dashboard_photo_click,
         .history_metric_index = 0,
         .metrics = {
             {
@@ -282,6 +399,11 @@ void app_main(void)
 
     sys_dashboard_start(&dashboard);
 
+    BaseType_t mqtt_task_ok = xTaskCreate(delayed_mqtt_task, "mqtt_delayed", 4096, NULL, 4, NULL);
+    if(mqtt_task_ok != pdPASS) {
+        ESP_LOGW(TAG, "failed to create delayed mqtt task");
+    }
+
     esp_err_t button_ret = boot_button_start();
     if(button_ret != ESP_OK) {
         ESP_LOGW(TAG, "boot button init not ready: %s", esp_err_to_name(button_ret));
@@ -291,28 +413,5 @@ void app_main(void)
     esp_err_t power_ret = power_monitor_start(dashboard_battery_update, NULL);
     if(power_ret != ESP_OK && power_ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "power monitor init not ready: %s", esp_err_to_name(power_ret));
-    }
-
-    const ha_mqtt_config_t ha_mqtt = {
-        .uri = CONFIG_DASHBOARD_MQTT_URI,
-        .username = CONFIG_DASHBOARD_MQTT_USERNAME,
-        .password = CONFIG_DASHBOARD_MQTT_PASSWORD,
-        .client_id = CONFIG_DASHBOARD_MQTT_CLIENT_ID,
-        .fnos_cpu_topic = CONFIG_DASHBOARD_MQTT_FNOS_CPU_TOPIC,
-        .fnos_mem_topic = CONFIG_DASHBOARD_MQTT_FNOS_MEM_TOPIC,
-        .fnos_gpu_topic = CONFIG_DASHBOARD_MQTT_FNOS_GPU_TOPIC,
-        .fnos_tx_topic = CONFIG_DASHBOARD_MQTT_FNOS_TX_TOPIC,
-        .fnos_rx_topic = CONFIG_DASHBOARD_MQTT_FNOS_RX_TOPIC,
-        .win_cpu_topic = CONFIG_DASHBOARD_MQTT_WIN_CPU_TOPIC,
-        .win_mem_topic = CONFIG_DASHBOARD_MQTT_WIN_MEM_TOPIC,
-        .win_gpu_topic = CONFIG_DASHBOARD_MQTT_WIN_GPU_TOPIC,
-        .win_tx_topic = CONFIG_DASHBOARD_MQTT_WIN_TX_TOPIC,
-        .win_rx_topic = CONFIG_DASHBOARD_MQTT_WIN_RX_TOPIC,
-        .weather_topic = CONFIG_DASHBOARD_MQTT_WEATHER_TOPIC,
-    };
-
-    esp_err_t mqtt_ret = ha_mqtt_start(&ha_mqtt);
-    if(mqtt_ret != ESP_OK && mqtt_ret != ESP_ERR_INVALID_ARG) {
-        ESP_LOGW(TAG, "mqtt init not ready: %s", esp_err_to_name(mqtt_ret));
     }
 }

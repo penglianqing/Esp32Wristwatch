@@ -29,7 +29,7 @@ menu "Board Support Package"
     menu "SPIFFS - Virtual File System"
         config BSP_SPIFFS_FORMAT_ON_MOUNT_FAIL
             bool "Format SPIFFS if mounting fails"
-            default n
+            default y
             help
                 Format SPIFFS if it fails to mount the filesystem.
 
@@ -55,7 +55,7 @@ menu "Board Support Package"
     menu "Display"
         config BSP_LCD_DPI_BUFFER_NUMS
             int "Set number of frame buffers"
-            default 3
+            default 1
             range 1 3
             help
                 Let DPI LCD driver create a specified number of frame-size buffers. Only when it is set to multiple can the avoiding tearing be turned on.

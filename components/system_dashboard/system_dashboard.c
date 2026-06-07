@@ -1,18 +1,22 @@
 #include "system_dashboard.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
 
 #define SCREEN_SIZE 466
+
+// HA Dashboard
 #define HISTORY_COUNT 14
 #define HISTORY_BAR_W ((HISTORY_COUNT) > 16 ? 8 : 7)
 #define HISTORY_BAR_H ((HISTORY_COUNT) > 16 ? 24 : 22)
@@ -24,6 +28,18 @@
 #define BOTTOM_BRAND_Y (-22)
 #define BOTTOM_TIME_Y (-2)
 #define TOP_BATTERY_Y (-2)
+
+// Photo Dashboard
+#define PHOTO_IMAGE_BYTES ((SCREEN_SIZE) * (SCREEN_SIZE) * 2)
+#define PHOTO_STRIPE_HEIGHT 8
+#define PHOTO_STRIPE_COUNT (((SCREEN_SIZE) + (PHOTO_STRIPE_HEIGHT) - 1) / (PHOTO_STRIPE_HEIGHT))
+#define PHOTO_STRIPES_PER_BATCH 2
+#define PHOTO_FRAME_DELAY_MS 5
+#define DASHBOARD_FRAME_DELAY_MS 33
+#define DASHBOARD_SWEEP_FRAME_DIVIDER 6
+#define PHOTO_TIME_Y (120)
+#define PHOTO_DATE_Y (160)
+#define PHOTO_BATTERY_Y (-210)
 
 static const char *TAG = "sys_dash";
 
@@ -47,7 +63,16 @@ static lv_obj_t * s_upload_label;
 static lv_obj_t * s_download_label;
 static lv_obj_t * s_brand_label;
 static lv_obj_t * s_battery_label;
+static lv_obj_t * s_face;
+static lv_obj_t * s_photo_page;
+static lv_obj_t * s_photo_stripes[PHOTO_STRIPE_COUNT];
+static lv_obj_t * s_photo_placeholder_label;
+static lv_obj_t * s_photo_time_label;
+static lv_obj_t * s_photo_date_label;
+static lv_obj_t * s_photo_battery_label;
 static lv_obj_t * s_bg_sweep[4];
+static lv_image_dsc_t s_photo_dsc[PHOTO_STRIPE_COUNT];
+static uint8_t * s_photo_buf;
 static portMUX_TYPE s_value_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_metric_external_valid[SYS_DASHBOARD_PANEL_COUNT][SYS_DASHBOARD_METRIC_COUNT];
 static int32_t s_metric_external_value[SYS_DASHBOARD_PANEL_COUNT][SYS_DASHBOARD_METRIC_COUNT];
@@ -63,6 +88,49 @@ static int32_t s_active_panel;
 static int32_t s_battery_percent = -1;
 static int32_t s_pending_panel_delta;
 static int32_t s_pending_panel_index = -1;
+static bool s_photo_memory_pending;
+static bool s_photo_apply_pending;
+static int32_t s_photo_apply_index;
+static bool s_panel_build_pending;
+static bool s_panel_black_frame_pending;
+static int64_t s_last_lvgl_lock_timeout_log_us;
+static char s_last_photo_time_text[16];
+static char s_last_photo_date_text[32];
+static char s_last_photo_battery_text[16];
+
+static void reset_dashboard_face_refs(void)
+{
+    s_face = NULL;
+    s_uptime_label = NULL;
+    s_upload_label = NULL;
+    s_download_label = NULL;
+    s_brand_label = NULL;
+    s_battery_label = NULL;
+    for(int i = 0; i < 4; i++) {
+        s_bg_sweep[i] = NULL;
+    }
+    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+        s_metrics[i].arc = NULL;
+        s_metrics[i].name_label = NULL;
+        s_metrics[i].value_label = NULL;
+        for(int j = 0; j < HISTORY_COUNT; j++) {
+            s_metrics[i].bars[j] = NULL;
+        }
+    }
+}
+
+static void reset_photo_page_refs(void)
+{
+    s_photo_page = NULL;
+    s_photo_placeholder_label = NULL;
+    s_photo_time_label = NULL;
+    s_photo_date_label = NULL;
+    s_photo_battery_label = NULL;
+    for(int i = 0; i < PHOTO_STRIPE_COUNT; i++) {
+        s_photo_stripes[i] = NULL;
+        memset(&s_photo_dsc[i], 0, sizeof(s_photo_dsc[i]));
+    }
+}
 
 static int32_t clamp_value(int32_t value, int32_t min, int32_t max)
 {
@@ -73,9 +141,15 @@ static int32_t clamp_value(int32_t value, int32_t min, int32_t max)
 
 static uint32_t frame_delay_ms(void)
 {
+    if(s_active_panel == SYS_DASHBOARD_PANEL_COUNT - 1) {
+        return PHOTO_FRAME_DELAY_MS;
+    }
     uint32_t hz = s_config.frame_refresh_hz ? s_config.frame_refresh_hz : 30;
     uint32_t delay = 1000 / hz;
-    return delay ? delay : 1;
+    if(delay < DASHBOARD_FRAME_DELAY_MS) {
+        delay = DASHBOARD_FRAME_DELAY_MS;
+    }
+    return delay ? delay : DASHBOARD_FRAME_DELAY_MS;
 }
 
 static uint32_t data_refresh_ms(void)
@@ -83,9 +157,18 @@ static uint32_t data_refresh_ms(void)
     return s_config.data_refresh_ms ? s_config.data_refresh_ms : 1000;
 }
 
+static int32_t active_panel_index(void)
+{
+#if SYS_DASHBOARD_PANEL_COUNT == 1
+    return 0;
+#else
+    return clamp_value(s_active_panel, 0, SYS_DASHBOARD_PANEL_COUNT - 1);
+#endif
+}
+
 static const char * active_panel_name(void)
 {
-    const char * name = s_config.panel_names[s_active_panel];
+    const char * name = s_config.panel_names[active_panel_index()];
     return name ? name : s_config.brand_name;
 }
 
@@ -93,6 +176,53 @@ static bool clock_panel_active(void)
 {
     return s_active_panel == 0;
 }
+
+static bool photo_panel_active(void)
+{
+    return s_active_panel == SYS_DASHBOARD_PANEL_COUNT - 1;
+}
+
+static void detach_photo_stripes(void)
+{
+    s_photo_apply_pending = false;
+    s_photo_apply_index = 0;
+
+    for(int i = 0; i < PHOTO_STRIPE_COUNT; i++) {
+        if(s_photo_stripes[i] != NULL) {
+            lv_image_set_src(s_photo_stripes[i], NULL);
+            lv_obj_add_flag(s_photo_stripes[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        memset(&s_photo_dsc[i], 0, sizeof(s_photo_dsc[i]));
+    }
+}
+
+static void release_photo_buffer(void)
+{
+    detach_photo_stripes();
+
+    if(s_photo_buf != NULL) {
+        heap_caps_free(s_photo_buf);
+        s_photo_buf = NULL;
+    }
+
+    s_last_photo_time_text[0] = '\0';
+    s_last_photo_date_text[0] = '\0';
+    s_last_photo_battery_text[0] = '\0';
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_photo_memory_pending = false;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+static void create_photo_page(lv_obj_t * screen);
+static void create_dashboard_face(lv_obj_t * screen);
+static void dashboard_gesture_cb(lv_event_t * event);
+static void update_metric_titles(void);
+static void refresh_panel_label(void);
+static int32_t metric_sample(int32_t index);
+static void update_bottom_labels(int64_t now_us);
+static void set_metric_text(metric_t * metric, int32_t value);
+static bool set_label_text_if_changed(lv_obj_t * label, char * cache, size_t cache_size, const char * text);
 
 static bool get_local_time(struct tm * timeinfo)
 {
@@ -163,6 +293,75 @@ static const char * metric_title(int32_t index)
     return clock_panel_active() ? clock_titles[index] : s_config.metrics[index].name;
 }
 
+static void update_page_visibility(bool release_old_photo, bool build_page)
+{
+    lv_obj_t * screen = lv_screen_active();
+    lv_obj_clean(screen);
+    reset_dashboard_face_refs();
+    reset_photo_page_refs();
+
+    if(release_old_photo) {
+        release_photo_buffer();
+    }
+
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(screen, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
+
+    if(build_page) {
+        if(photo_panel_active()) {
+            create_photo_page(screen);
+            if(s_config.photo_click_cb != NULL) {
+                s_config.photo_click_cb(s_config.photo_click_user_ctx);
+            }
+        }
+        else {
+            create_dashboard_face(screen);
+        }
+    }
+    else {
+        lv_obj_t * blank = lv_obj_create(screen);
+        lv_obj_set_size(blank, SCREEN_SIZE, SCREEN_SIZE);
+        lv_obj_center(blank);
+        lv_obj_set_style_radius(blank, 0, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(blank, lv_color_hex(0x080a0c), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(blank, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(blank, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(blank, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(blank, LV_OBJ_FLAG_SCROLLABLE);
+    }
+}
+
+static void begin_panel_transition(void)
+{
+    /* Keep transitions cheap on this panel; page cleanup happens in update_page_visibility(). */
+}
+
+static void finish_pending_panel_build(void)
+{
+    if(!s_panel_build_pending) {
+        return;
+    }
+
+    if(s_panel_black_frame_pending) {
+        s_panel_black_frame_pending = false;
+        return;
+    }
+
+    update_page_visibility(false, true);
+    s_panel_build_pending = false;
+
+    if(!photo_panel_active()) {
+        refresh_panel_label();
+        update_metric_titles();
+        for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+            set_metric_text(&s_metrics[i], metric_sample(i));
+        }
+        update_bottom_labels(esp_timer_get_time());
+    }
+}
+
 static void set_metric_text(metric_t * metric, int32_t value)
 {
     int32_t index = (int32_t)(metric - s_metrics);
@@ -220,12 +419,13 @@ static int32_t metric_sample(int32_t index)
         return clock_value(index);
     }
 
+    int32_t panel_index = active_panel_index();
     int32_t value = 0;
     bool has_external = false;
 
     portENTER_CRITICAL(&s_value_lock);
-    has_external = s_active_panel > 0 && s_metric_external_valid[s_active_panel][index];
-    value = s_metric_external_value[s_active_panel][index];
+    has_external = panel_index > 0 && s_metric_external_valid[panel_index][index];
+    value = s_metric_external_value[panel_index][index];
     portEXIT_CRITICAL(&s_value_lock);
 
     if(has_external) {
@@ -241,12 +441,13 @@ static int32_t tx_sample(void)
         return 0;
     }
 
+    int32_t panel_index = active_panel_index();
     int32_t value = 0;
     bool has_external = false;
 
     portENTER_CRITICAL(&s_value_lock);
-    has_external = s_active_panel > 0 && s_tx_external_valid[s_active_panel];
-    value = s_tx_external_value[s_active_panel];
+    has_external = panel_index > 0 && s_tx_external_valid[panel_index];
+    value = s_tx_external_value[panel_index];
     portEXIT_CRITICAL(&s_value_lock);
 
     return has_external ? value : next_speed(&s_config.tx);
@@ -258,12 +459,13 @@ static int32_t rx_sample(void)
         return 0;
     }
 
+    int32_t panel_index = active_panel_index();
     int32_t value = 0;
     bool has_external = false;
 
     portENTER_CRITICAL(&s_value_lock);
-    has_external = s_active_panel > 0 && s_rx_external_valid[s_active_panel];
-    value = s_rx_external_value[s_active_panel];
+    has_external = panel_index > 0 && s_rx_external_valid[panel_index];
+    value = s_rx_external_value[panel_index];
     portEXIT_CRITICAL(&s_value_lock);
 
     return has_external ? value : next_speed(&s_config.rx);
@@ -360,6 +562,21 @@ static void refresh_panel_label(void)
     }
 }
 
+static bool set_label_text_if_changed(lv_obj_t * label, char * cache, size_t cache_size, const char * text)
+{
+    if(label == NULL || cache == NULL || cache_size == 0 || text == NULL) {
+        return false;
+    }
+
+    if(strncmp(cache, text, cache_size) == 0) {
+        return false;
+    }
+
+    snprintf(cache, cache_size, "%s", text);
+    lv_label_set_text(label, cache);
+    return true;
+}
+
 static void update_battery_label(void)
 {
     if(s_battery_label == NULL) {
@@ -374,6 +591,108 @@ static void update_battery_label(void)
     lv_label_set_text_fmt(s_battery_label, " %" LV_PRId32 "%%", s_battery_percent);
 }
 
+static void update_photo_labels(void)
+{
+    if(s_photo_time_label == NULL || s_photo_date_label == NULL || s_photo_battery_label == NULL) {
+        return;
+    }
+
+    char time_buf[16];
+    char date_buf[32];
+    char battery_buf[16];
+
+    struct tm timeinfo = {0};
+    if(get_local_time(&timeinfo)) {
+        strftime(time_buf, sizeof(time_buf), "%H:%M", &timeinfo);
+        strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %a", &timeinfo);
+    }
+    else {
+        snprintf(time_buf, sizeof(time_buf), "%s", "--:--");
+        snprintf(date_buf, sizeof(date_buf), "%s", "---- -- --");
+    }
+
+    if(s_battery_percent < 0) {
+        snprintf(battery_buf, sizeof(battery_buf), "%s", "-- %");
+    }
+    else {
+        snprintf(battery_buf, sizeof(battery_buf), " %" LV_PRId32 "%%", s_battery_percent);
+    }
+
+    set_label_text_if_changed(s_photo_time_label, s_last_photo_time_text, sizeof(s_last_photo_time_text), time_buf);
+    set_label_text_if_changed(s_photo_date_label, s_last_photo_date_text, sizeof(s_last_photo_date_text), date_buf);
+    set_label_text_if_changed(s_photo_battery_label, s_last_photo_battery_text, sizeof(s_last_photo_battery_text), battery_buf);
+}
+
+static bool apply_staged_photo(void)
+{
+    if(s_photo_stripes[0] == NULL || s_photo_buf == NULL) {
+        if(s_photo_placeholder_label != NULL) {
+            lv_obj_remove_flag(s_photo_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        return false;
+    }
+
+    for(int i = 0; i < PHOTO_STRIPE_COUNT; i++) {
+        int32_t stripe_y = i * PHOTO_STRIPE_HEIGHT;
+        int32_t stripe_h = PHOTO_STRIPE_HEIGHT;
+        if((stripe_y + stripe_h) > SCREEN_SIZE) {
+            stripe_h = SCREEN_SIZE - stripe_y;
+        }
+
+        memset(&s_photo_dsc[i], 0, sizeof(s_photo_dsc[i]));
+        s_photo_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
+        s_photo_dsc[i].header.cf = LV_COLOR_FORMAT_RGB565;
+        s_photo_dsc[i].header.w = SCREEN_SIZE;
+        s_photo_dsc[i].header.h = stripe_h;
+        s_photo_dsc[i].header.stride = SCREEN_SIZE * 2;
+        s_photo_dsc[i].data_size = SCREEN_SIZE * stripe_h * 2;
+        s_photo_dsc[i].data = s_photo_buf + (stripe_y * SCREEN_SIZE * 2);
+    }
+
+    s_photo_apply_index = 0;
+    s_photo_apply_pending = true;
+    return true;
+}
+
+static void apply_photo_stripe_batch(void)
+{
+    if(!s_photo_apply_pending || s_photo_stripes[0] == NULL) {
+        return;
+    }
+
+    int32_t end = s_photo_apply_index + PHOTO_STRIPES_PER_BATCH;
+    if(end > PHOTO_STRIPE_COUNT) {
+        end = PHOTO_STRIPE_COUNT;
+    }
+
+    for(int32_t i = s_photo_apply_index; i < end; i++) {
+        lv_image_set_src(s_photo_stripes[i], NULL);
+        lv_image_set_src(s_photo_stripes[i], &s_photo_dsc[i]);
+        lv_obj_invalidate(s_photo_stripes[i]);
+    }
+
+    s_photo_apply_index = end;
+    if(s_photo_apply_index >= PHOTO_STRIPE_COUNT) {
+        s_photo_apply_pending = false;
+        if(s_photo_placeholder_label != NULL) {
+            lv_obj_add_flag(s_photo_placeholder_label, LV_OBJ_FLAG_HIDDEN);
+        }
+        ESP_LOGI(TAG, "photo loaded");
+    }
+}
+
+static bool consume_pending_photo_memory(void)
+{
+    bool pending = false;
+
+    portENTER_CRITICAL(&s_value_lock);
+    pending = s_photo_memory_pending;
+    s_photo_memory_pending = false;
+    portEXIT_CRITICAL(&s_value_lock);
+
+    return pending;
+}
+
 static void switch_panel(int32_t delta)
 {
     int32_t next = (s_active_panel + delta) % SYS_DASHBOARD_PANEL_COUNT;
@@ -385,13 +704,12 @@ static void switch_panel(int32_t delta)
         return;
     }
 
+    bool leaving_photo = photo_panel_active();
+    begin_panel_transition();
     s_active_panel = next;
-    refresh_panel_label();
-    update_metric_titles();
-    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-        set_metric_text(&s_metrics[i], metric_sample(i));
-    }
-    update_bottom_labels(esp_timer_get_time());
+    s_panel_build_pending = true;
+    s_panel_black_frame_pending = true;
+    update_page_visibility(leaving_photo, false);
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
 }
@@ -403,13 +721,12 @@ static void show_panel(int32_t panel_index)
         return;
     }
 
+    bool leaving_photo = photo_panel_active();
+    begin_panel_transition();
     s_active_panel = panel_index;
-    refresh_panel_label();
-    update_metric_titles();
-    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-        set_metric_text(&s_metrics[i], metric_sample(i));
-    }
-    update_bottom_labels(esp_timer_get_time());
+    s_panel_build_pending = true;
+    s_panel_black_frame_pending = true;
+    update_page_visibility(leaving_photo, false);
     ESP_LOGI(TAG, "panel switched to %s (%" LV_PRId32 ")",
              active_panel_name(), s_active_panel);
 }
@@ -444,11 +761,25 @@ static void dashboard_gesture_cb(lv_event_t * event)
 
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
     if(dir == LV_DIR_LEFT) {
-        switch_panel(1);
+        portENTER_CRITICAL(&s_value_lock);
+        s_pending_panel_delta++;
+        portEXIT_CRITICAL(&s_value_lock);
     }
     else if(dir == LV_DIR_RIGHT) {
-        switch_panel(-1);
+        portENTER_CRITICAL(&s_value_lock);
+        s_pending_panel_delta--;
+        portEXIT_CRITICAL(&s_value_lock);
     }
+}
+
+static void photo_click_cb(lv_event_t * event)
+{
+    LV_UNUSED(event);
+    if(!photo_panel_active() || s_config.photo_click_cb == NULL) {
+        return;
+    }
+
+    s_config.photo_click_cb(s_config.photo_click_user_ctx);
 }
 
 static void dashboard_update_task(void * arg)
@@ -460,55 +791,77 @@ static void dashboard_update_task(void * arg)
     ESP_LOGI(TAG, "dashboard update task started");
 
     while(1) {
+        bool memory_photo_ready = consume_pending_photo_memory();
+
         if(bsp_display_lock(500)) {
             int64_t now_us = esp_timer_get_time();
 
             apply_pending_panel_request();
+            finish_pending_panel_build();
+            if(photo_panel_active() && memory_photo_ready) {
+                apply_staged_photo();
+            }
+            if(photo_panel_active() && !s_panel_build_pending) {
+                apply_photo_stripe_batch();
+            }
 
-            if(now_us - last_sample_us >= (int64_t)data_refresh_ms() * 1000) {
+            if(!s_panel_build_pending && now_us - last_sample_us >= (int64_t)data_refresh_ms() * 1000) {
                 last_sample_us = now_us;
+                if(photo_panel_active()) {
+                    update_photo_labels();
+                }
+                else {
+                    for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
+                        set_metric_text(&s_metrics[i], metric_sample(i));
+                    }
+
+                    if(s_config.history_metric_index >= 0 &&
+                       s_config.history_metric_index < SYS_DASHBOARD_METRIC_COUNT) {
+                        metric_t * history_metric = &s_metrics[s_config.history_metric_index];
+                        if(clock_panel_active()) {
+                            s_clock_cpu_history_value = next_value(&s_config.metrics[0], s_clock_cpu_history_value);
+                            set_history_color(history_metric, s_config.metrics[0].color);
+                            push_history(history_metric, s_clock_cpu_history_value);
+                        }
+                        else {
+                            set_history_color(history_metric, history_metric->color);
+                            push_history(history_metric, history_metric->target);
+                        }
+                    }
+
+                    update_bottom_labels(now_us);
+                    update_time_label(now_us);
+                }
+            }
+
+            if(!photo_panel_active() && !s_panel_build_pending) {
                 for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-                    set_metric_text(&s_metrics[i], metric_sample(i));
-                }
+                    int32_t delta = s_metrics[i].target - s_metrics[i].arc_value;
+                    int32_t step = delta / 8;
 
-                if(s_config.history_metric_index >= 0 &&
-                   s_config.history_metric_index < SYS_DASHBOARD_METRIC_COUNT) {
-                    metric_t * history_metric = &s_metrics[s_config.history_metric_index];
-                    if(clock_panel_active()) {
-                        s_clock_cpu_history_value = next_value(&s_config.metrics[0], s_clock_cpu_history_value);
-                        set_history_color(history_metric, s_config.metrics[0].color);
-                        push_history(history_metric, s_clock_cpu_history_value);
+                    if(step == 0 && delta != 0) {
+                        step = delta > 0 ? 1 : -1;
                     }
-                    else {
-                        set_history_color(history_metric, history_metric->color);
-                        push_history(history_metric, history_metric->target);
+
+                    set_metric_arc_value(&s_metrics[i], s_metrics[i].arc_value + step);
+                }
+
+                if((frame % DASHBOARD_SWEEP_FRAME_DIVIDER) == 0) {
+                    for(int i = 0; i < 3; i++) {
+                        lv_arc_set_rotation(s_bg_sweep[i], (int32_t)((frame * (2 + i)) + (i * 120)) % 360);
                     }
+                    lv_arc_set_rotation(s_bg_sweep[3], (int32_t)((frame * 5) + 180) % 360);
                 }
-
-                update_bottom_labels(now_us);
-                update_time_label(now_us);
             }
-
-            for(int i = 0; i < SYS_DASHBOARD_METRIC_COUNT; i++) {
-                int32_t delta = s_metrics[i].target - s_metrics[i].arc_value;
-                int32_t step = delta / 8;
-
-                if(step == 0 && delta != 0) {
-                    step = delta > 0 ? 1 : -1;
-                }
-
-                set_metric_arc_value(&s_metrics[i], s_metrics[i].arc_value + step);
-            }
-
-            for(int i = 0; i < 3; i++) {
-                lv_arc_set_rotation(s_bg_sweep[i], (int32_t)((frame * (2 + i)) + (i * 120)) % 360);
-            }
-            lv_arc_set_rotation(s_bg_sweep[3], (int32_t)((frame * 5) + 180) % 360);
 
             bsp_display_unlock();
         }
         else {
-            ESP_LOGW(TAG, "LVGL lock timeout");
+            int64_t now_us = esp_timer_get_time();
+            if(!photo_panel_active() || (now_us - s_last_lvgl_lock_timeout_log_us) >= 2000000) {
+                s_last_lvgl_lock_timeout_log_us = now_us;
+                ESP_LOGW(TAG, "LVGL lock timeout");
+            }
         }
 
         frame++;
@@ -648,17 +1001,67 @@ static void create_history(lv_obj_t * parent, metric_t * metric, int32_t y)
     }
 }
 
-static void create_dashboard(void)
+static lv_obj_t * create_photo_overlay_label(lv_obj_t * parent, const char * text,
+                                             const lv_font_t * font, lv_align_t align,
+                                             int32_t x, int32_t y)
 {
-    lv_obj_t * screen = lv_screen_active();
-    lv_obj_clean(screen);
-    configure_gesture_input();
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x080a0c), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(screen, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_t * label = create_label(parent, text, font, lv_color_hex(0xffffff), align, x, y);
+    lv_obj_set_style_text_opa(label, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_text_outline_stroke_width(label, 2, LV_PART_MAIN);
+    lv_obj_set_style_text_outline_stroke_color(label, lv_color_hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_text_outline_stroke_opa(label, LV_OPA_80, LV_PART_MAIN);
+    return label;
+}
 
+static void create_photo_page(lv_obj_t * screen)
+{
+    s_photo_page = lv_obj_create(screen);
+    enable_gesture_bubble(s_photo_page);
+    lv_obj_set_size(s_photo_page, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_photo_page);
+    lv_obj_set_style_radius(s_photo_page, 0, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(s_photo_page, false, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_photo_page, lv_color_hex(0x080a0c), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_photo_page, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_photo_page, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_photo_page, 0, LV_PART_MAIN);
+    lv_obj_add_flag(s_photo_page, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_photo_page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_photo_page, dashboard_gesture_cb, LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(s_photo_page, photo_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+    for(int i = 0; i < PHOTO_STRIPE_COUNT; i++) {
+        int32_t stripe_y = i * PHOTO_STRIPE_HEIGHT;
+        int32_t stripe_h = PHOTO_STRIPE_HEIGHT;
+        if((stripe_y + stripe_h) > SCREEN_SIZE) {
+            stripe_h = SCREEN_SIZE - stripe_y;
+        }
+
+        s_photo_stripes[i] = lv_image_create(s_photo_page);
+        enable_gesture_bubble(s_photo_stripes[i]);
+        lv_obj_add_flag(s_photo_stripes[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(s_photo_stripes[i], SCREEN_SIZE, stripe_h);
+        lv_obj_align(s_photo_stripes[i], LV_ALIGN_TOP_MID, 0, stripe_y);
+        lv_obj_add_event_cb(s_photo_stripes[i], photo_click_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    }
+
+    s_photo_placeholder_label = create_label(s_photo_page, "", &lv_font_montserrat_18,
+                                             lv_color_hex(0x9da5af), LV_ALIGN_CENTER, 0, 0);
+    lv_obj_move_background(s_photo_placeholder_label);
+
+    s_photo_time_label = create_photo_overlay_label(s_photo_page, "--:--", &lv_font_montserrat_26,
+                                                    LV_ALIGN_CENTER, 0, PHOTO_TIME_Y);
+    s_photo_date_label = create_photo_overlay_label(s_photo_page, "---- -- --", &lv_font_montserrat_26,
+                                                    LV_ALIGN_CENTER, 0, PHOTO_DATE_Y);
+    s_photo_battery_label = create_photo_overlay_label(s_photo_page, "--%", &lv_font_montserrat_14,
+                                                       LV_ALIGN_CENTER, 0, PHOTO_BATTERY_Y);
+    update_photo_labels();
+}
+
+static void create_dashboard_face(lv_obj_t * screen)
+{
     lv_obj_t * face = lv_obj_create(screen);
+    s_face = face;
     lv_obj_set_size(face, SCREEN_SIZE, SCREEN_SIZE);
     lv_obj_center(face);
     lv_obj_set_style_radius(face, LV_RADIUS_CIRCLE, LV_PART_MAIN);
@@ -715,6 +1118,12 @@ static void create_dashboard(void)
                                  LV_ALIGN_BOTTOM_MID, 0, BOTTOM_BRAND_Y);
 }
 
+static void create_dashboard(void)
+{
+    configure_gesture_input();
+    update_page_visibility(false, true);
+}
+
 void sys_dashboard_start(const sys_dashboard_config_t * config)
 {
     if(config == NULL) {
@@ -737,9 +1146,10 @@ void sys_dashboard_start(const sys_dashboard_config_t * config)
     s_battery_percent = clamp_value(s_config.battery_percent, -1, 100);
     s_clock_cpu_history_value = s_config.metrics[0].value;
     s_active_panel = s_config.default_panel_index;
-    if(s_config.panel_names[0] == NULL) s_config.panel_names[0] = s_config.brand_name;
-    if(s_config.panel_names[1] == NULL) s_config.panel_names[1] = "FnOS";
-    if(s_config.panel_names[2] == NULL) s_config.panel_names[2] = "Windows11";
+    if(SYS_DASHBOARD_PANEL_COUNT > 0 && s_config.panel_names[0] == NULL) s_config.panel_names[0] = s_config.brand_name;
+    if(SYS_DASHBOARD_PANEL_COUNT > 1 && s_config.panel_names[1] == NULL) s_config.panel_names[1] = "FnOS";
+    if(SYS_DASHBOARD_PANEL_COUNT > 2 && s_config.panel_names[2] == NULL) s_config.panel_names[2] = "Windows11";
+    if(SYS_DASHBOARD_PANEL_COUNT > 3 && s_config.panel_names[3] == NULL) s_config.panel_names[3] = "Photo";
     if(s_config.time_text == NULL) s_config.time_text = "00:00";
     if(s_config.tx.name == NULL) s_config.tx.name = "TX";
     if(s_config.tx.unit == NULL) s_config.tx.unit = "Mbps";
@@ -845,6 +1255,7 @@ void sys_dashboard_set_battery_percent(int32_t percent)
 
     if(bsp_display_lock(100)) {
         update_battery_label();
+        update_photo_labels();
         bsp_display_unlock();
     }
 }
@@ -865,6 +1276,40 @@ void sys_dashboard_show_panel(int32_t panel_index)
     portENTER_CRITICAL(&s_value_lock);
     s_pending_panel_index = panel_index;
     s_pending_panel_delta = 0;
+    portEXIT_CRITICAL(&s_value_lock);
+}
+
+void sys_dashboard_set_photo_path(const char * path)
+{
+    LV_UNUSED(path);
+}
+
+void sys_dashboard_reload_photo(void)
+{
+}
+
+void sys_dashboard_set_photo_buffer(const uint8_t * data, size_t len)
+{
+    if(data == NULL || len != PHOTO_IMAGE_BYTES) {
+        return;
+    }
+
+    if(!photo_panel_active()) {
+        return;
+    }
+
+    if(s_photo_buf == NULL) {
+        s_photo_buf = heap_caps_malloc(PHOTO_IMAGE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if(s_photo_buf == NULL) {
+            ESP_LOGE(TAG, "failed to allocate PSRAM photo buffer: %u bytes", (unsigned)PHOTO_IMAGE_BYTES);
+            return;
+        }
+    }
+
+    memcpy(s_photo_buf, data, PHOTO_IMAGE_BYTES);
+
+    portENTER_CRITICAL(&s_value_lock);
+    s_photo_memory_pending = true;
     portEXIT_CRITICAL(&s_value_lock);
 }
 
