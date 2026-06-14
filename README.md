@@ -6,8 +6,10 @@
 <https://docs.waveshare.net/ESP32-S3-Touch-AMOLED-1.75C/>
 
 ## 效果图
-![图：ESP32 联动 HA 1.PNG](pictures/图：ESP32 联动 HA 1.PNG.JPEG)
-![图：ESP32 联动 HA 2.PNG](pictures/图：ESP32 联动 HA 2.PNG.JPEG)
+
+![ESP32 联动 HA 1](pictures/图：ESP32%20联动%20HA%201.PNG)
+
+![ESP32 联动 HA 2](pictures/图：ESP32%20联动%20HA%202.PNG)
 
 ## 主要功能
 
@@ -119,4 +121,3 @@ idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.local" flash
 - 不提交 `sdkconfig`、`sdkconfig.old`
 - 不保留本地 JPG 中间文件和临时转换脚本
 - fallback 图片直接使用仓库中的 `main/assets/photo_fallback.rgb565`
-
