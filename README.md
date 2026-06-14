@@ -5,6 +5,10 @@
 开发板资料：
 <https://docs.waveshare.net/ESP32-S3-Touch-AMOLED-1.75C/>
 
+## 效果图
+![图：ESP32 联动 HA 1.PNG](pictures/图：ESP32 联动 HA 1.PNG.JPEG)
+![图：ESP32 联动 HA 2.PNG](pictures/图：ESP32 联动 HA 2.PNG.JPEG)
+
 ## 主要功能
 
 - `Photo` 默认首页
